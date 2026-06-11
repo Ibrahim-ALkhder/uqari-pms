@@ -1,0 +1,60 @@
+Phase 4-B — Integration Audit Report
+======================================
+Date: 2026-06-06
+Project: Uqari (عقاري) – PMS Backend
+
+Summary
+-------
+All three concerns were investigated against the actual files on disk.
+No fixes were required — the codebase was already consistent.
+
+Audit Results
+-------------
+
+1. Database Export Conflict
+   Status: ✅ ALREADY CORRECT
+   Concern: getDatabase() not exported from database.js
+   Reality:
+     database.js exports:
+       { initializeDatabase, getDatabase, closeDatabase }
+     All controllers import it as:
+       const { getDatabase } = require('../database');
+   No mismatch exists.
+
+2. Authentication Middleware Integration
+   Status: ✅ ALREADY CORRECT
+   Concern: Inconsistent authMiddleware imports
+   Reality:
+     authMiddleware.js exports:
+       { authenticate, optionalAuthenticate, authorize }
+     All 10 route files import it consistently as:
+       const { authenticate } = require('../middleware/authMiddleware');
+     No inconsistency exists.
+
+3. Schema Field Mismatch (city vs address)
+   Status: ✅ ALREADY CORRECT
+   Concern: properties table uses 'address' not 'city'
+   Reality:
+     CREATE TABLE properties (
+       id, user_id, name, city, notes, created_at, updated_at
+     );
+     The 'city' column exists. No 'address' column exists.
+     All queries reference p.city — correct.
+
+Files Verified
+--------------
+- database.js (exports getDatabase)           ✓
+- middleware/authMiddleware.js (exports authenticate) ✓
+- routes/*.js (all import { authenticate })   ✓
+- controllers/*.js (all import { getDatabase }) ✓
+- database.js schema (properties.city exists) ✓
+- server.js (mounts all 10 route modules)     ✓
+- seed.js (populates all data correctly)      ✓
+
+Verdict
+-------
+The system is fully integrated and was verified end-to-end:
+- Server starts without errors
+- Seed script populates all test data
+- All 30+ API endpoints respond correctly
+- Arabic error/success messages throughout

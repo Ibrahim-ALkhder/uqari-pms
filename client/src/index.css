@@ -1,0 +1,43 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: 'Cairo', 'Inter', sans-serif;
+  background: #0a1628;
+  color: #e2e8f0;
+  min-height: 100vh;
+  direction: rtl;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a1628;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3a5c;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3d5075;
+}

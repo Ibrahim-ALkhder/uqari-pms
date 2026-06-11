@@ -1,0 +1,36 @@
+{
+  "name": "uqari-pms-server",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Uqari (عقاري) – PMS Backend API Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "seed": "node seed.js",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "pms",
+    "property-management",
+    "arabic",
+    "saudi-arabia"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.10.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "helmet": "^8.2.0",
+    "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.11.0",
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2",
+    "vitest": "^4.1.8"
+  }
+}

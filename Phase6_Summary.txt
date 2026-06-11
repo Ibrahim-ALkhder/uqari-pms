@@ -1,0 +1,211 @@
+================================================================================
+  Phase 6 - Project Restructuring & Frontend Architecture Summary
+  Uqari (عقاري) Property Management System
+================================================================================
+
+Date: 2026-06-06
+
+================================================================================
+  TASK 1: PROJECT RESTRUCTURING
+================================================================================
+
+Before (flat structure):
+  E:\projects\test2\
+    ├── server.js, database.js, seed.js
+    ├── controllers/, routes/, middleware/, cron/, data/, uploads/
+    ├── src/, index.html, vite.config.js  (frontend mixed with backend)
+    ├── node_modules/ (all deps in one pool)
+    └── package.json (backend + frontend deps together)
+
+After (professional monorepo structure):
+  E:\projects\test2\
+    ├── server/                         ← All backend code
+    │   ├── server.js                   ← Express entry point (port 3001)
+    │   ├── database.js                 ← SQLite schema + init
+    │   ├── seed.js                     ← Standalone seed script
+    │   ├── cronJobs.js                 ← Legacy cron (unused)
+    │   ├── package.json                ← Backend deps only
+    │   ├── controllers/                ← 11 controllers
+    │   ├── routes/                     ← 11 route files
+    │   ├── middleware/                 ← authMiddleware.js
+    │   ├── cron/                       ← financialCron.js
+    │   ├── data/                       ← SQLite DB files
+    │   └── uploads/receipts/           ← Multer upload target
+    │
+    ├── client/                         ← All frontend code
+    │   ├── index.html                  ← Vite entry (lang="ar", dir="rtl")
+    │   ├── vite.config.js              ← Vite + React + proxy config
+    │   ├── package.json                ← Frontend deps only
+    │   ├── dist/                       ← Build output
+    │   └── src/
+    │       ├── App.jsx                 ← Router: /login + 12 protected routes
+    │       ├── App.css                 ← Minimal (layout styles in Layout.css)
+    │       ├── index.jsx               ← React 19 entry
+    │       ├── index.css               ← Global RTL + fonts
+    │       ├── api/
+    │       │   └── axiosConfig.js      ← baseURL: /api (uses Vite proxy)
+    │       └── components/
+    │           ├── layout/
+    │           │   ├── Layout.jsx      ← Sidebar + Outlet + NavLink
+    │           │   └── Layout.css      ← Collapsible sidebar, RTL nav
+    │           ├── shared/
+    │           │   ├── Modal.jsx       ← Reusable overlay (ESC/click-outside)
+    │           │   └── Modal.css       ← Glassmorphism modal
+    │           └── pages/              ← 12 page components
+    │               ├── Login.jsx + Login.css
+    │               ├── Dashboard.jsx + Dashboard.css
+    │               ├── Settings.jsx
+    │               ├── Properties.jsx
+    │               ├── PropertyDetails.jsx
+    │               ├── UnitForm.jsx
+    │               ├── Tenants.jsx
+    │               ├── ContractDetails.jsx
+    │               ├── Invoices.jsx
+    │               ├── Expenses.jsx
+    │               ├── Maintenance.jsx
+    │               └── Reports.jsx
+    │
+    ├── package.json                   ← Root orchestrator (concurrently)
+    ├── .gitignore                     ← node_modules, dist, *.db
+    └── README.md                      ← Quick start + architecture
+
+================================================================================
+  TASK 2: FRONTEND ARCHITECTURE FOR 12 PAGES
+================================================================================
+
+Router structure (client/src/App.jsx):
+
+  /
+  ├── /login              → Login page (no sidebar, glassmorphism card)
+  │
+  └── (ProtectedRoute)    ← Checks localStorage for auth_token
+      └── Layout (sidebar)
+          ├── /                        → Dashboard (main hub)
+          ├── /settings                → Profile, currency, bank
+          ├── /properties              → Property list
+          ├── /properties/:id          → Property details + units
+          ├── /units/new               → Add unit form
+          ├── /units/:id/edit          → Edit unit form
+          ├── /tenants                 → Tenants directory
+          ├── /contracts/:id           → Contract details
+          ├── /invoices                → Invoice management
+          ├── /expenses                → Expense tracking
+          ├── /maintenance             → Maintenance tickets
+          ├── /reports                 → Financial reports
+          └── *                        → Redirect to /
+
+================================================================================
+  TASK 3: TECHNICAL CHANGES
+================================================================================
+
+1. Path Separation:
+   - Backend:  port 3001 (standalone Express)
+   - Frontend: port 5173 (Vite dev server)
+   - Proxy:    Vite proxies /api/* and /uploads/* to localhost:3001
+
+2. Import Paths Fixed:
+   - server.js:    `require('./database')`  → correct (same directory)
+   - All routes:   `require('../middleware/authMiddleware')` → correct
+   - All controllers: `require('../database')` → correct
+   - seed.js:      `require('./database')`  → correct
+   - expenseRoutes.js: multer destination `path.join(__dirname, '..', 'uploads', 'receipts')`
+                    → resolves to server/uploads/receipts ✓
+   - server.js static: `path.join(__dirname, 'uploads')` → server/uploads ✓
+   - axiosConfig:  `baseURL: '/api'`  → uses Vite proxy instead of hardcoded port
+   - Dashboard.jsx: `import api from '../../api/axiosConfig'` → correct depth
+   - Login.jsx:    `import api from '../../api/axiosConfig'` → correct depth
+
+3. Vite Proxy Configuration (client/vite.config.js):
+   ```js
+   server: {
+     port: 5173,
+     proxy: {
+       '/api':     { target: 'http://localhost:3001', changeOrigin: true },
+       '/uploads': { target: 'http://localhost:3001', changeOrigin: true },
+     },
+   }
+   ```
+
+4. database.js Path:
+   - Uses: `path.join(__dirname, 'data', 'pms_database.db')`
+   - __dirname resolves to: E:\projects\test2\server\
+   - Final path: E:\projects\test2\server\data\pms_database.db ✓
+
+5. Package Splitting:
+   - Root:      concurrently (devDependency only)
+   - server/:   bcrypt, better-sqlite3, cors, express, helmet,
+                jsonwebtoken, morgan, multer, node-cron
+   - client/:   react, react-dom, react-router-dom, axios,
+                @vitejs/plugin-react, vite
+
+================================================================================
+  TASK 4: SHARED COMPONENTS
+================================================================================
+
+Layout (client/src/components/layout/Layout.jsx):
+  - Collapsible sidebar with 8 navigation items
+  - Uses React Router's <NavLink> for active state highlighting
+  - Logout button (clears token, redirects to /login)
+  - Uses <Outlet> for nested route rendering
+  - Responsive: sidebar hidden on mobile (< 768px)
+
+Modal (client/src/components/shared/Modal.jsx):
+  - Controlled component: open/onClose/title/children props
+  - Backdrop overlay with blur
+  - ESC key to close
+  - Click outside to close
+  - Entry animation (scale + fade)
+
+================================================================================
+  PAGE PLACEHOLDER COMPONENTS (10 new)
+================================================================================
+
+All 10 new pages follow a consistent pattern:
+  - Import from react-router-dom if they use useParams
+  - Export default function
+  - Render <div className="page"> with <h2> title
+  - Include a placeholder description in Arabic
+
+Pages created:
+  1. Settings.jsx      - الإعدادات (الملف الشخصي، العملة، البيانات المصرفية)
+  2. Properties.jsx    - العقارات (قائمة العقارات)
+  3. PropertyDetails.jsx - تفاصيل العقار (عرض + وحدات مرتبطة)
+  4. UnitForm.jsx      - إضافة/تعديل الوحدة (نموذج)
+  5. Tenants.jsx       - دليل المستأجرين (قائمة + بحث)
+  6. ContractDetails.jsx - تفاصيل العقد (عرض + فواتير)
+  7. Invoices.jsx      - الفواتير (إدارة + مدفوعات)
+  8. Expenses.jsx      - المصروفات (تسجيل + إيصالات)
+  9. Maintenance.jsx   - الصيانة (تذاكر حسب الأولوية)
+  10. Reports.jsx      - التقارير (دخل + مصروفات + إحصائيات)
+
+================================================================================
+  FIXES APPLIED
+================================================================================
+
+Fix 1: 401 Redirect Loop
+  - Problem: No /login route → 401 → /login → catch-all → / → 401 → loop
+  - Fix: Added explicit /login route, ProtectedRoute wrapper, isRedirecting flag
+
+Fix 2: Wrong Axios baseURL after restructuring
+  - Problem: axiosConfig had hardcoded localhost:3001
+  - Fix: Changed to relative /api, added Vite proxy for /api and /uploads
+
+Fix 3: Import paths broken after moving pages/
+  - Problem: Dashboard.jsx and Login.jsx imported api from '../api/' (wrong depth)
+  - Fix: Changed to '../../api/axiosConfig'
+
+Fix 4: Login.css deleted during cleanup
+  - Problem: Remove-Item accidentally deleted Login.css
+  - Fix: Recreated Login.css with all glassmorphism login styles
+
+================================================================================
+  VERIFIED RESULTS
+================================================================================
+
+Backend:   health endpoint returns "healthy" on port 3001
+Frontend:  builds clean (111 modules, 0 errors) on port 5173
+Proxy:     GET /api/health through Vite proxy returns "healthy" ✓
+Structure: All backend under /server/, all frontend under /client/
+Routes:    /login serves Login page, / serves Dashboard (with token)
+
+================================================================================

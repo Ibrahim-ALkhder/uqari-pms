@@ -1,0 +1,434 @@
+================================================================================
+  PHASE 1 – SCOPE OF WORK (SOW)
+  Property Management System (MVP)
+  For Elderly Landlords in Sudan & Saudi Arabia
+================================================================================
+
+Document Version: 1.0
+Date: June 2026
+Target User: Single Landlord (Elderly, Non-Technical, Arabic-Speaking)
+Tenant Access: None (Tenants are manual entries only)
+
+================================================================================
+1. SCOPE OF WORK (SOW)
+================================================================================
+
+1.1 PROJECT OVERVIEW
+--------------------
+This project is a simplified, single-user Property Management System (PMS)
+designed exclusively for an elderly landlord. The system replaces paper-based
+record keeping with a digital tool that is visually accessible (large fonts,
+high contrast, minimal screens), works fully offline (no internet dependency
+for core operations), and covers five core business functions: property and
+unit tracking, tenant directory, invoice/billing management, expense tracking,
+and maintenance request logging.
+
+The landlord is the only user. Tenants do not have accounts, cannot log in,
+and cannot interact with the system. Their information is entered and managed
+solely by the landlord as a reference record.
+
+The system must work in Arabic (right-to-left interface) as the primary
+language. All numbers, currency, and dates follow the formats used in
+Sudan (SDG) and Saudi Arabia (SAR). A single toggle to switch between the
+two currencies is sufficient; no multi-currency per property is needed.
+
+1.2 TECHNICAL CONSTRAINTS
+--------------------------
+- Fully offline-capable (no mandatory internet connection).
+- Single-device deployment (the landlord's personal device, likely a tablet
+  or a laptop running Windows or Android).
+- No cloud dependency; all data stored locally (SQLite or a flat JSON file
+  with encryption if possible).
+- No external API integrations in Phase 1 (no bank feeds, no SMS gateways,
+  no payment processors).
+- No printing required; the landlord views everything on screen.
+- Zero external dependencies that require ongoing subscriptions.
+
+1.3 USER PERSONA & DESIGN PRINCIPLES
+--------------------------------------
+Primary Persona: "Abu Ahmed" – a retired man aged 65+ who owns 3–15 rental
+units across one or two buildings. He is comfortable reading Arabic, has
+limited experience with smartphones/computers, and prefers physical paper
+records. He needs a digital tool that feels as simple as a notebook.
+
+Design Principles enforced throughout:
+- Font size never below 18px; default font size is 24px.
+- High-contrast color scheme: black text on white or pale yellow background.
+  Avoid low-contrast pastels, grays, and light blues.
+- Every screen has at most 3–5 interactive elements. No hamburger menus,
+  no hidden drawers, no swipe gestures.
+- All navigation uses large, labeled buttons with icons and Arabic text.
+- Confirmation dialogs before every destructive action (delete, archive).
+- On-screen help text in Arabic at the bottom of every input form.
+- No scrolling within forms; keep all fields visible on one screen.
+- Touch-friendly targets: minimum 48x48 dp touch area.
+
+1.4 LANGUAGE & LOCALIZATION
+-----------------------------
+- Primary UI language: Arabic (RTL layout).
+- All labels, buttons, messages, errors, and help text are in Arabic.
+- Currency can toggle between Sudanese Pound (SDG) and Saudi Riyal (SAR).
+- Date format: Arabic weekday name + day + month name + year.
+- Numbers displayed in Arabic-Indic (شرقي) numerals if the device supports
+  it, otherwise Western digits are acceptable.
+
+1.5 DATA STORAGE & PRIVACY
+---------------------------
+- All data stored locally on the device.
+- Optional 4-digit PIN lock to open the application.
+- No data is sent to any server.
+- Backup is a single-file export (JSON) that the landlord can copy to a USB
+  drive or email to himself.
+- No cloud sync, no user account, no login credentials stored externally.
+
+================================================================================
+2. DETAILED FEATURE LIST
+================================================================================
+
+----------------------------------------------------------------------
+2.1 MUST-HAVE FOR MVP (Core Features)
+----------------------------------------------------------------------
+
+A. DASHBOARD (الصفحة الرئيسية)
+   Purpose: Show the landlord a quick snapshot of his business at a glance.
+   Details:
+   - Display total number of properties (عدد العقارات).
+   - Display total number of units (عدد الوحدات).
+   - Display number of occupied units vs. vacant units (وحدات مؤجرة / شاغرة).
+   - Display total expected monthly rent (إجمالي الإيجار الشهري المتوقع).
+   - Display total overdue invoices (الفواتير المتأخرة) and their sum.
+   - Display a list of invoices due within the next 7 days with unit number
+     and tenant name.
+   - One large button: "Add New Property" (إضافة عقار جديد).
+   - One large button: "View All Units" (عرض كل الوحدات).
+   - All numbers are displayed as large, bold text (minimum 28px).
+
+B. PROPERTY MANAGEMENT (إدارة العقارات)
+   Purpose: Allow the landlord to define and organize his buildings.
+   Details:
+   - Add a property with fields:
+     * Property name (اسم العقار) – e.g., "عمارة الملك فهد"
+     * City / neighborhood (المدينة / الحي)
+     * Number of units (عدد الوحدات) – auto-generates unit list.
+     * Notes (ملاحظات) – optional free text.
+   - Edit property details.
+   - Delete a property (with confirmation: "هل أنت متأكد من حذف هذا العقار؟
+     سيتم حذف جميع الوحدات المرتبطة به.").
+   - View a list of all properties.
+   - Clicking a property shows its details and a list of its units.
+
+C. UNIT MANAGEMENT (إدارة الوحدات)
+   Purpose: Manage individual rental units (apartments, shops, rooms).
+   Details:
+   - Each unit belongs to a property.
+   - Add a unit with fields:
+     * Unit number / identifier (رقم الوحدة) – e.g., "101", "شقة 3".
+     * Unit type (نوع الوحدة) – dropdown: Apartment (شقة), Shop (محل),
+       Room (غرفة), Villa (فيلا), Studio (استوديو).
+     * Floor number (رقم الطابق) – optional.
+     * Monthly rent amount (قيمة الإيجار الشهري).
+     * Status (الحالة) – dropdown: Vacant (شاغرة), Occupied (مؤجرة),
+       Under Maintenance (تحت الصيانة).
+   - Edit unit details.
+   - Change unit status via a simple button press (single tap to toggle
+     between Vacant and Occupied).
+   - When marking a unit as Occupied, prompt the landlord to assign or
+     create a tenant record for this unit.
+   - Delete a unit (with confirmation).
+
+D. TENANT DIRECTORY (دفتر المستأجرين)
+   Purpose: Act as a digital phonebook and record for all tenants.
+   Details:
+   - Add a tenant with fields:
+     * Full name (الاسم الكامل).
+     * Phone number (رقم الجوال) – primary contact.
+     * Secondary phone number (رقم جوال آخر) – optional.
+     * ID/National ID number (رقم الهوية) – optional.
+     * Notes (ملاحظات) – e.g., "يدفع متأخر دائماً" (always pays late).
+   - Each tenant is linked to exactly one unit. A tenant cannot exist
+     without an associated unit.
+   - Display tenant list as a phonebook-style list sorted alphabetically.
+   - Tap a tenant to view full details.
+   - Search tenant by name (search box with large font, real-time filtering).
+   - Edit tenant details.
+   - When a unit becomes vacant, the tenant record is kept for history
+     but marked as "Former Tenant" (مستأجر سابق).
+   - Former tenants are not shown in the main directory by default; a
+     toggle button "Show Former Tenants" (عرض المستأجرين السابقين) reveals
+     them.
+
+E. INVOICING & BILLING ENGINE (الفواتير والفواتير الآلية)
+   Purpose: Automatically generate monthly rent invoices and track payments.
+   Details:
+   - The system runs an automatic billing engine. On the 1st of each month
+     (or a configurable day), the system generates an invoice for every
+     occupied unit.
+   - Each invoice includes:
+     * Invoice number (رقم الفاتورة) – auto-generated, e.g., "INV-2026-06-001".
+     * Unit number and property name.
+     * Tenant name.
+     * Billing period (شهر الفاتورة) – e.g., "يونيو 2026".
+     * Rent amount (قيمة الإيجار).
+     * Due date (تاريخ الاستحقاق) – e.g., 5th of the month.
+     * Status (الحالة) – Unpaid (غير مدفوعة), Paid (مدفوعة),
+       Partial (مدفوعة جزئياً), Overdue (متأخرة).
+   - The landlord opens the invoice list screen and sees all invoices for
+     the current month. He can tap an invoice to mark it as paid.
+   - When marking as paid:
+     * Option to enter the amount received (for partial payments).
+     * Option to enter the payment date (defaults to today).
+     * Option to enter a payment method: Cash (نقداً), Bank Transfer (تحويل
+       بنكي), or Cheque (شيك).
+   - Overdue detection: If the current date is past the due date and the
+     invoice is unpaid, the status auto-changes to "Overdue" and the invoice
+     appears in the dashboard overdue section.
+   - The landlord can manually create a one-time invoice for non-rent charges
+     (e.g., water bill, electricity, maintenance fee). Fields: unit, tenant,
+     amount, description, due date.
+   - The landlord can view invoice history by unit or by tenant.
+   - One button: "Print View" (عرض للطباعة) – shows a simplified, clean
+     version of the invoice on screen (no actual printing required).
+   - A summary bar shows: Total invoices this month, Total collected,
+     Total outstanding.
+
+F. EXPENSE TRACKING (تسجيل المصروفات)
+   Purpose: Record all property-related expenses.
+   Details:
+   - Add an expense with fields:
+     * Expense type (نوع المصروف) – dropdown: Maintenance (صيانة),
+       Utilities (فواتير), Repairs (إصلاحات), Cleaning (تنظيف),
+       Municipality Fees (رسوم بلدية), Insurance (تأمين), Other (أخرى).
+     * Amount (المبلغ).
+     * Date (التاريخ) – defaults to today.
+     * Property (العقار) – optional: link expense to a specific property.
+     * Unit (الوحدة) – optional: link expense to a specific unit.
+     * Description (الوصف) – free text.
+     * Receipt image (صورة الفاتورة) – optional, the landlord can take a
+       photo of the receipt with the device camera and attach it.
+   - View expense list sorted by date (newest first).
+   - Filter expenses by property, by type, or by date range.
+   - Show total expenses for the current month and year-to-date.
+   - Edit and delete expenses.
+   - The expense list item shows: type icon, amount (bold), date, and brief
+     description.
+
+G. MAINTENANCE TICKETS (تذاكر الصيانة)
+   Purpose: Log and track maintenance requests manually.
+   Details:
+   - Add a maintenance ticket with fields:
+     * Unit (الوحدة) – select from a dropdown of all units.
+     * Reported by (المبلغ) – defaults to tenant name if unit is occupied,
+       otherwise "المالك" (Owner).
+     * Issue description (وصف المشكلة) – free text (large multi-line input).
+     * Urgency (درجة الأهمية) – dropdown: Low (منخفضة), Medium (متوسطة),
+       High (عالية), Emergency (طارئة).
+     * Date reported (تاريخ البلاغ) – defaults to today.
+     * Status (الحالة) – dropdown: Open (مفتوحة), In Progress (قيد التنفيذ),
+       Resolved (تم الحل).
+   - Attach a photo of the issue (optional, camera/gallery).
+   - Update ticket status with a single tap (Open → In Progress → Resolved).
+   - When a ticket is marked as Resolved, the system prompts:
+     "هل تريد إضافة تكلفة الصيانة؟" (Do you want to add a maintenance cost?)
+     If yes, it opens the Add Expense form pre-filled with "Maintenance"
+     type and the unit pre-selected.
+   - View all tickets sorted by urgency (Emergency first, then High, etc.).
+   - View tickets filtered by status (Open, In Progress, Resolved).
+   - View tickets for a specific unit.
+
+H. SEARCH & FILTER (البحث والتصفية)
+   Purpose: Unified simple search across the system.
+   Details:
+   - A single search bar (with filter icon) on every list screen.
+   - Search by: tenant name, unit number, property name, invoice number.
+   - Filters are pre-set buttons (e.g., "Show Only Overdue", "Show Vacant
+     Units") – no complex filter builder.
+
+I. DATA BACKUP & RESTORE (نسخ احتياطي واستعادة)
+   Purpose: Protect the landlord's data.
+   Details:
+   - One button: "Backup Data" (نسخ احتياطي) – exports all data as a single
+     .json file to a chosen location (Downloads folder or USB drive).
+   - One button: "Restore Data" (استعادة البيانات) – prompts the landlord
+     to select a backup file and restores it, replacing all current data.
+   - Confirmation before restore: "سيتم استبدال جميع البيانات الحالية. هل
+     أنت متأكد؟" (All current data will be replaced. Are you sure?)
+
+J. APPLICATION SETTINGS (الإعدادات)
+   Details:
+   - Language: Arabic only (no language toggle in Phase 1).
+   - Currency toggle: SDG (جنيه سوداني) ↔ SAR (ريال سعودي).
+   - Monthly billing day (يوم الفاتورة الشهرية): default 1, adjustable 1–28.
+   - Due day (يوم الاستحقاق): default 5, adjustable 1–28.
+   - PIN lock toggle and PIN change screen.
+   - Font size: Large (كبير) / Extra Large (كبير جداً) toggle.
+   - About screen: version number, developer contact (if any).
+
+----------------------------------------------------------------------
+2.2 NICE-TO-HAVE FOR FUTURE (Post-MVP / Phase 2)
+----------------------------------------------------------------------
+
+These features are explicitly excluded from Phase 1 but documented for
+future planning.
+
+1. Multi-User Support (دعم المستخدمين المتعددين)
+   Allow a property manager or family member to have a separate login with
+   limited permissions (view-only, or specific properties).
+
+2. SMS/WhatsApp Integration (التكامل مع واتساب)
+   Send automated invoice reminders and payment confirmations via WhatsApp
+   or SMS to tenants. Requires internet and third-party API.
+
+3. Payment Gateway (بوابة دفع إلكتروني)
+   Allow tenants to pay rent online via bank transfer, STC Pay, or cash
+   collection services. Requires internet and third-party integration.
+
+4. Receipt Printing (طباعة الإيصالات)
+   Generate PDF receipts and invoices for printing or sharing via WhatsApp.
+
+5. Multiple Currencies per Property (عملات متعددة لكل عقار)
+   Allow different properties to use different currencies (e.g., one property
+   in SAR, another in SDG) instead of a single toggle.
+
+6. Recurring Expenses (مصروفات متكررة)
+   Auto-generate recurring expenses (e.g., monthly electricity bill,
+   quarterly municipality fees) on scheduled dates.
+
+7. Advanced Reporting (تقارير متقدمة)
+   Generate annual profit/loss reports, tax summaries, and occupancy rate
+   charts with visual graphs.
+
+8. Contract Management (إدارة العقود)
+   Upload and store scanned rental contracts (PDF/image) linked to each
+   unit. Include automatic contract expiry reminders.
+
+9. Unit Inspection Log (سجل معاينة الوحدات)
+   A checklist-based inspection form for unit entry and exit inspections,
+   with photo attachments and damage tracking.
+
+10. Multi-Language Support (دعم لغات متعددة)
+    Add English and other languages alongside Arabic.
+
+11. Dark Mode (الوضع الليلي)
+    An alternative dark color scheme for reduced eye strain.
+
+12. Notification Reminders (تذكيرات وإشعارات)
+    Local push notifications on the device for:
+    - Upcoming invoice due dates.
+    - Unresolved maintenance tickets older than 7 days.
+    - Lease expiry reminders (if contracts are added).
+
+13. Tenant Communication Log (سجل التواصل مع المستأجر)
+    Log phone calls, WhatsApp messages, and visits for each tenant.
+
+14. Bulk Operations (عمليات جماعية)
+    Select multiple invoices and mark them as paid at once. Generate
+    invoices for all occupied units with one click.
+
+================================================================================
+3. PROPOSED PROJECT MILESTONES
+================================================================================
+
+The project is divided into 4 milestones over an estimated 10-12 week
+development timeline for a single developer.
+
+----------------------------------------------------------------------
+MILESTONE 1: Foundation & Data Layer (Weeks 1–2)
+----------------------------------------------------------------------
+Deliverables:
+- Design and implement the local database schema (SQLite) covering all
+  entities: Property, Unit, Tenant, Invoice, Expense, MaintenanceTicket,
+  and Settings.
+- Implement data access layer with CRUD operations for all entities.
+- Implement the automatic monthly invoice generation engine (background
+  check on app launch – if a new month has started, generate invoices for
+  all occupied units).
+- Implement data backup/restore as a single JSON export/import.
+- Implement PIN lock screen.
+
+Acceptance Criteria:
+- All CRUD operations work correctly.
+- Invoice engine generates correct invoices when the month changes.
+- Backup file can be restored on a fresh installation.
+- PIN lock prevents access without the correct code.
+
+----------------------------------------------------------------------
+MILESTONE 2: Core Screens – Properties, Units, Tenants (Weeks 3–5)
+----------------------------------------------------------------------
+Deliverables:
+- Build the main navigation shell (bottom tabs or large side buttons).
+- Dashboard screen with all summary cards and 7-day due list.
+- Property list screen + Add/Edit/Delete property.
+- Unit list screen (grouped by property) + Add/Edit/Delete unit.
+- Unit status toggle (Vacant ↔ Occupied).
+- Tenant directory (phonebook list + search).
+- Add/Edit/Delete tenant linked to a unit.
+- Former tenant view toggle.
+
+Acceptance Criteria:
+- Landlord can add a property, then add units to it.
+- Changing a unit to Occupied prompts tenant creation/assignment.
+- Dashboard reflects accurate counts.
+- Search finds tenants by name instantly.
+- All screens use large fonts and high contrast.
+
+----------------------------------------------------------------------
+MILESTONE 3: Billing, Expenses & Maintenance (Weeks 6–8)
+----------------------------------------------------------------------
+Deliverables:
+- Invoice list screen (monthly view) with status indicators.
+- Mark invoice as paid (full or partial) with payment method and date.
+- Manual invoice creation for non-rent charges.
+- Overdue detection and dashboard integration.
+- Expense list screen with filters (by type, property, date range).
+- Add/Edit/Delete expense with optional receipt photo.
+- Maintenance ticket list screen sorted by urgency.
+- Add/Edit ticket with optional issue photo.
+- Status progression: Open → In Progress → Resolved.
+- Resolved ticket → prompt to create expense.
+
+Acceptance Criteria:
+- Monthly invoices auto-generate and appear on the due date.
+- Marking an invoice as paid updates the dashboard total.
+- Expenses are recorded and filterable.
+- Maintenance tickets can be created, updated, and linked to expenses.
+
+----------------------------------------------------------------------
+MILESTONE 4: Settings, Polish & Testing (Weeks 9–10)
+----------------------------------------------------------------------
+Deliverables:
+- Settings screen: currency toggle, billing day, due day, PIN management,
+  font size toggle.
+- Global search bar on all list screens.
+- Confirmation dialogs on all destructive actions.
+- Visual polish: consistent 24px+ fonts, high-contrast color palette,
+  RTL layout confirmation.
+- Full manual QA testing:
+  * Test all CRUD operations and edge cases.
+  * Test invoice auto-generation at month rollover.
+  * Test backup/restore cycle.
+  * Test on target device (tablet or laptop with touch screen).
+- Arabic language review: all labels, messages, errors, and help text
+  reviewed by a native Arabic speaker.
+- Bug fixes based on testing.
+- Deployment: package the application as a standalone executable (or
+  installable APK for Android) with clear installation instructions in
+  Arabic.
+
+Acceptance Criteria:
+- All MVP features are implemented and working.
+- No crashes during normal use.
+- All text is in Arabic and correctly aligned RTL.
+- Font sizes meet the minimum 18px / default 24px requirement.
+- Backup/restore works end-to-end.
+- The application can be handed off to the landlord for real-world use.
+
+----------------------------------------------------------------------
+STRETCH GOAL (If Time Permits, Still Within Phase 1)
+----------------------------------------------------------------------
+- Attach receipt/issue photos from camera and gallery.
+- Export expense report as a simple text summary for the landlord to share
+  with his accountant.
+
+================================================================================
+END OF PHASE 1 SCOPE DOCUMENT
+================================================================================

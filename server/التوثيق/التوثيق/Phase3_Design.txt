@@ -1,0 +1,2424 @@
+================================================================================
+  PHASE 3 – SYSTEM ARCHITECTURE & DATABASE DESIGN
+  Property Management System – Production-Ready Blueprint
+================================================================================
+
+Document Version: 3.0
+Date: June 2026
+Database Engine: SQLite 3 (via better-sqlite3, WAL mode)
+Backend Runtime: Node.js 20+ LTS with Express.js 4+
+Frontend: React 18+ (architecture-agnostic in this document)
+Deployment Model: Cloud-hosted single-instance (scalable to multi-instance)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1. Complete Database Schema (SQLite)
+   1.1 PRAGMA Configuration
+   1.2 Table: users
+   1.3 Table: properties
+   1.4 Table: units
+   1.5 Table: tenants
+   1.6 Table: contracts
+   1.7 Table: invoices
+   1.8 Table: payments
+   1.9 Table: expenses
+   1.10 Table: maintenance_tickets
+   1.11 Table: settings
+   1.12 Table: audit_log
+   1.13 Table: sync_log (for offline sync tracking)
+   1.14 CREATE INDEX Statements
+   1.15 Triggers (for automatic updated_at)
+2. Complete API Specification (Node.js/Express Routes)
+   2.1 Authentication Endpoints
+   2.2 Dashboard Endpoints
+   2.3 Property Endpoints
+   2.4 Unit Endpoints
+   2.5 Tenant Endpoints
+   2.6 Contract Endpoints
+   2.7 Invoice Endpoints
+   2.8 Payment Endpoints
+   2.9 Expense Endpoints
+   2.10 Maintenance Ticket Endpoints
+   2.11 Settings Endpoints
+   2.12 Backup & Restore Endpoints
+   2.13 File Serving Endpoints
+   2.14 Synchronization Endpoint (POST /api/sync)
+3. Server-Side Cron Job Pseudo-Code
+4. Error Handling & Validation Strategy
+5. Security Implementation Details
+
+================================================================================
+1. COMPLETE DATABASE SCHEMA (SQLite)
+================================================================================
+
+All tables use INTEGER PRIMARY KEY (SQLite alias for rowid), TEXT for all
+string/date/enum fields, REAL for monetary amounts (8-byte IEEE floating
+point – sufficient for currency with rounding at display layer), and INTEGER
+for boolean flags (0/1). Foreign keys are enforced via PRAGMA.
+
+----------------------------------------------------------------------
+1.1 PRAGMA Configuration
+----------------------------------------------------------------------
+
+Executed once when the database connection is opened:
+
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -64000;
+PRAGMA temp_store = MEMORY;
+
+----------------------------------------------------------------------
+1.2 Table: users
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    email           TEXT    NOT NULL UNIQUE,
+    password_hash   TEXT    NOT NULL,
+    pin_hash        TEXT    DEFAULT NULL,
+    role            TEXT    NOT NULL DEFAULT 'landlord'
+                          CHECK (role IN ('landlord', 'admin', 'tenant')),
+    is_active       INTEGER NOT NULL DEFAULT 1
+                          CHECK (is_active IN (0, 1)),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.3 Table: properties
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS properties (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+    name            TEXT    NOT NULL
+                          CHECK (length(name) >= 2 AND length(name) <= 100),
+    city            TEXT    NOT NULL
+                          CHECK (length(city) >= 2 AND length(city) <= 100),
+    notes           TEXT    DEFAULT NULL
+                          CHECK (notes IS NULL OR length(notes) <= 500),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.4 Table: units
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS units (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id     INTEGER NOT NULL
+                    REFERENCES properties(id) ON DELETE CASCADE,
+    unit_number     TEXT    NOT NULL
+                          CHECK (length(unit_number) >= 1 AND length(unit_number) <= 50),
+    type            TEXT    NOT NULL DEFAULT 'Apartment'
+                          CHECK (type IN ('Apartment', 'Shop', 'Room', 'Villa', 'Studio')),
+    floor           INTEGER DEFAULT NULL
+                          CHECK (floor IS NULL OR (floor >= 0 AND floor <= 200)),
+    monthly_rent    REAL    NOT NULL DEFAULT 0
+                          CHECK (monthly_rent >= 0 AND monthly_rent <= 999999999),
+    status          TEXT    NOT NULL DEFAULT 'Vacant'
+                          CHECK (status IN ('Vacant', 'Occupied', 'UnderMaintenance')),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (property_id, unit_number)
+);
+
+----------------------------------------------------------------------
+1.5 Table: tenants
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS tenants (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+    user_account_id INTEGER DEFAULT NULL
+                    REFERENCES users(id) ON DELETE SET NULL,
+    full_name       TEXT    NOT NULL
+                          CHECK (length(full_name) >= 2 AND length(full_name) <= 100),
+    phone           TEXT    NOT NULL
+                          CHECK (length(phone) >= 7 AND length(phone) <= 20),
+    secondary_phone TEXT    DEFAULT NULL
+                          CHECK (secondary_phone IS NULL OR (length(secondary_phone) >= 7 AND length(secondary_phone) <= 20)),
+    national_id     TEXT    DEFAULT NULL
+                          CHECK (national_id IS NULL OR (length(national_id) >= 5 AND length(national_id) <= 20)),
+    notes           TEXT    DEFAULT NULL
+                          CHECK (notes IS NULL OR length(notes) <= 500),
+    is_former       INTEGER NOT NULL DEFAULT 0
+                          CHECK (is_former IN (0, 1)),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.6 Table: contracts
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS contracts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id       INTEGER NOT NULL
+                    REFERENCES tenants(id) ON DELETE CASCADE,
+    unit_id         INTEGER NOT NULL
+                    REFERENCES units(id) ON DELETE CASCADE,
+    start_date      TEXT    NOT NULL
+                          CHECK (start_date IS DATE(start_date)),
+    end_date        TEXT    DEFAULT NULL
+                          CHECK (end_date IS NULL OR (end_date IS DATE(end_date) AND end_date >= start_date)),
+    monthly_rent    REAL    NOT NULL
+                          CHECK (monthly_rent >= 0 AND monthly_rent <= 999999999),
+    status          TEXT    NOT NULL DEFAULT 'Active'
+                          CHECK (status IN ('Active', 'Expired', 'Terminated')),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.7 Table: invoices
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS invoices (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    contract_id     INTEGER NOT NULL
+                    REFERENCES contracts(id) ON DELETE CASCADE,
+    unit_id         INTEGER NOT NULL,
+    tenant_id       INTEGER NOT NULL,
+    invoice_number  TEXT    NOT NULL,
+    billing_month   INTEGER NOT NULL
+                          CHECK (billing_month >= 1 AND billing_month <= 12),
+    billing_year    INTEGER NOT NULL
+                          CHECK (billing_year >= 2020 AND billing_year <= 2099),
+    amount          REAL    NOT NULL
+                          CHECK (amount >= 0 AND amount <= 999999999),
+    due_date        TEXT    NOT NULL
+                          CHECK (due_date IS DATE(due_date)),
+    status          TEXT    NOT NULL DEFAULT 'Unpaid'
+                          CHECK (status IN ('Unpaid', 'Paid', 'Partial', 'Overdue', 'Cancelled')),
+    notes           TEXT    DEFAULT NULL
+                          CHECK (notes IS NULL OR length(notes) <= 500),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (contract_id, billing_month, billing_year)
+);
+
+----------------------------------------------------------------------
+1.8 Table: payments
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS payments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id      INTEGER NOT NULL
+                    REFERENCES invoices(id) ON DELETE CASCADE,
+    amount          REAL    NOT NULL
+                          CHECK (amount > 0 AND amount <= 999999999),
+    payment_date    TEXT    NOT NULL
+                          CHECK (payment_date IS DATE(payment_date)),
+    payment_method  TEXT    NOT NULL
+                          CHECK (payment_method IN ('Cash', 'BankTransfer', 'Cheque')),
+    notes           TEXT    DEFAULT NULL
+                          CHECK (notes IS NULL OR length(notes) <= 250),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.9 Table: expenses
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS expenses (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL
+                      REFERENCES users(id) ON DELETE CASCADE,
+    property_id       INTEGER DEFAULT NULL
+                      REFERENCES properties(id) ON DELETE SET NULL,
+    unit_id           INTEGER DEFAULT NULL
+                      REFERENCES units(id) ON DELETE SET NULL,
+    type              TEXT    NOT NULL
+                      CHECK (type IN ('Maintenance', 'Utilities', 'Repairs', 'Cleaning', 'MunicipalityFees', 'Insurance', 'Other')),
+    amount            REAL    NOT NULL
+                      CHECK (amount > 0 AND amount <= 999999999),
+    date              TEXT    NOT NULL
+                      CHECK (date IS DATE(date)),
+    description       TEXT    NOT NULL
+                      CHECK (length(description) >= 3 AND length(description) <= 500),
+    receipt_image_path TEXT   DEFAULT NULL,
+    created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.10 Table: maintenance_tickets
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS maintenance_tickets (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL
+                      REFERENCES users(id) ON DELETE CASCADE,
+    unit_id           INTEGER NOT NULL
+                      REFERENCES units(id) ON DELETE CASCADE,
+    reported_by       TEXT    NOT NULL
+                      CHECK (length(reported_by) >= 2 AND length(reported_by) <= 100),
+    description       TEXT    NOT NULL
+                      CHECK (length(description) >= 10 AND length(description) <= 2000),
+    urgency           TEXT    NOT NULL DEFAULT 'Medium'
+                      CHECK (urgency IN ('Low', 'Medium', 'High', 'Emergency')),
+    status            TEXT    NOT NULL DEFAULT 'Open'
+                      CHECK (status IN ('Open', 'InProgress', 'Resolved')),
+    issue_image_path  TEXT    DEFAULT NULL,
+    resolved_at       TEXT    DEFAULT NULL
+                      CHECK (resolved_at IS NULL OR (resolved_at IS DATE(resolved_at))),
+    created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+----------------------------------------------------------------------
+1.11 Table: settings
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS settings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+    key             TEXT    NOT NULL
+                    CHECK (length(key) >= 1 AND length(key) <= 50),
+    value           TEXT    NOT NULL
+                    CHECK (length(value) >= 0 AND length(value) <= 255),
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (user_id, key)
+);
+
+----------------------------------------------------------------------
+1.12 Table: audit_log
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER DEFAULT NULL
+                    REFERENCES users(id) ON DELETE SET NULL,
+    action          TEXT    NOT NULL
+                    CHECK (length(action) >= 2 AND length(action) <= 50),
+    target_id       INTEGER DEFAULT NULL,
+    ip_address      TEXT    DEFAULT NULL
+                    CHECK (ip_address IS NULL OR length(ip_address) <= 45),
+    user_agent      TEXT    DEFAULT NULL
+                    CHECK (user_agent IS NULL OR length(user_agent) <= 500),
+    details         TEXT    DEFAULT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+
+----------------------------------------------------------------------
+1.13 Table: sync_log (for offline sync conflict resolution)
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS sync_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+    entity_type     TEXT    NOT NULL
+                    CHECK (entity_type IN ('property', 'unit', 'tenant', 'contract', 'invoice', 'payment', 'expense', 'maintenance_ticket', 'setting')),
+    entity_id       INTEGER NOT NULL,
+    client_timestamp TEXT   NOT NULL,
+    server_timestamp TEXT   NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    operation       TEXT    NOT NULL
+                    CHECK (operation IN ('create', 'update', 'delete')),
+    conflict_type   TEXT    DEFAULT 'none'
+                    CHECK (conflict_type IN ('none', 'client_wins', 'server_wins', 'manual_review')),
+    payload         TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_log_user_entity ON sync_log(user_id, entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_sync_log_created_at ON sync_log(created_at);
+
+----------------------------------------------------------------------
+1.14 CREATE INDEX Statements
+----------------------------------------------------------------------
+
+-- Properties
+CREATE INDEX IF NOT EXISTS idx_properties_user_id ON properties(user_id);
+CREATE INDEX IF NOT EXISTS idx_properties_name ON properties(name);
+
+-- Units
+CREATE INDEX IF NOT EXISTS idx_units_property_id ON units(property_id);
+CREATE INDEX IF NOT EXISTS idx_units_status ON units(status);
+CREATE INDEX IF NOT EXISTS idx_units_property_status ON units(property_id, status);
+
+-- Tenants
+CREATE INDEX IF NOT EXISTS idx_tenants_user_id ON tenants(user_id);
+CREATE INDEX IF NOT EXISTS idx_tenants_full_name ON tenants(full_name);
+CREATE INDEX IF NOT EXISTS idx_tenants_phone ON tenants(phone);
+CREATE INDEX IF NOT EXISTS idx_tenants_is_former ON tenants(is_former);
+CREATE INDEX IF NOT EXISTS idx_tenants_name_former ON tenants(user_id, is_former, full_name);
+
+-- Contracts
+CREATE INDEX IF NOT EXISTS idx_contracts_tenant_id ON contracts(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_contracts_unit_id ON contracts(unit_id);
+CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status);
+CREATE INDEX IF NOT EXISTS idx_contracts_active ON contracts(unit_id, status) WHERE status = 'Active';
+
+-- Invoices
+CREATE INDEX IF NOT EXISTS idx_invoices_contract_id ON invoices(contract_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_unit_id ON invoices(unit_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_tenant_id ON invoices(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);
+CREATE INDEX IF NOT EXISTS idx_invoices_billing_period ON invoices(billing_year, billing_month);
+CREATE INDEX IF NOT EXISTS idx_invoices_due_date ON invoices(due_date);
+CREATE INDEX IF NOT EXISTS idx_invoices_status_due ON invoices(status, due_date);
+CREATE INDEX IF NOT EXISTS idx_invoices_user_lookup ON invoices(tenant_id, billing_year, billing_month, status);
+
+-- Payments
+CREATE INDEX IF NOT EXISTS idx_payments_invoice_id ON payments(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date);
+
+-- Expenses
+CREATE INDEX IF NOT EXISTS idx_expenses_user_id ON expenses(user_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_property_id ON expenses(property_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_type ON expenses(type);
+CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
+CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, date);
+
+-- Maintenance Tickets
+CREATE INDEX IF NOT EXISTS idx_maintenance_tickets_user_id ON maintenance_tickets(user_id);
+CREATE INDEX IF NOT EXISTS idx_maintenance_tickets_unit_id ON maintenance_tickets(unit_id);
+CREATE INDEX IF NOT EXISTS idx_maintenance_tickets_status ON maintenance_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_maintenance_tickets_urgency ON maintenance_tickets(urgency);
+CREATE INDEX IF NOT EXISTS idx_maintenance_tickets_status_urgency ON maintenance_tickets(status, urgency);
+
+-- Settings
+CREATE INDEX IF NOT EXISTS idx_settings_user_id ON settings(user_id);
+
+----------------------------------------------------------------------
+1.15 Triggers (for automatic updated_at)
+----------------------------------------------------------------------
+
+CREATE TRIGGER IF NOT EXISTS trg_users_updated_at
+    AFTER UPDATE ON users
+    FOR EACH ROW
+BEGIN
+    UPDATE users SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_properties_updated_at
+    AFTER UPDATE ON properties
+    FOR EACH ROW
+BEGIN
+    UPDATE properties SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_units_updated_at
+    AFTER UPDATE ON units
+    FOR EACH ROW
+BEGIN
+    UPDATE units SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_tenants_updated_at
+    AFTER UPDATE ON tenants
+    FOR EACH ROW
+BEGIN
+    UPDATE tenants SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_contracts_updated_at
+    AFTER UPDATE ON contracts
+    FOR EACH ROW
+BEGIN
+    UPDATE contracts SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_invoices_updated_at
+    AFTER UPDATE ON invoices
+    FOR EACH ROW
+BEGIN
+    UPDATE invoices SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_expenses_updated_at
+    AFTER UPDATE ON expenses
+    FOR EACH ROW
+BEGIN
+    UPDATE expenses SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_maintenance_tickets_updated_at
+    AFTER UPDATE ON maintenance_tickets
+    FOR EACH ROW
+BEGIN
+    UPDATE maintenance_tickets SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_settings_updated_at
+    AFTER UPDATE ON settings
+    FOR EACH ROW
+BEGIN
+    UPDATE settings SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE id = OLD.id;
+END;
+
+================================================================================
+2. COMPLETE API SPECIFICATION (Node.js/Express Routes)
+================================================================================
+
+Base URL: /api
+Content-Type for requests with body: application/json (except file uploads
+which use multipart/form-data).
+Authentication: All endpoints except POST /api/auth/login require header:
+  Authorization: Bearer <jwt_token>
+Standard Success Response Envelope:
+  { "success": true, "message": "arabic text", "data": { ... } }
+Standard Error Response Envelope:
+  { "success": false, "message": "arabic text", "errors": [ { "field": "...", "message": "..." } ] }
+Standard 401 Response:
+  { "success": false, "message": "انتهت صلاحية الجلسة. يرجى تسجيل الدخول مرة أخرى." }
+Standard 500 Response:
+  { "success": false, "message": "حدث خطأ في الخادم. الرجاء المحاولة لاحقاً." }
+
+----------------------------------------------------------------------
+2.1 Authentication Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+POST /api/auth/login
+----------------------------------------------------------------------
+Description: Authenticate landlord with email and password. Returns JWT.
+Headers: Content-Type: application/json
+Request Body:
+{
+    "email": "user@example.com",
+    "password": "secret123"
+}
+Validation Rules:
+  - email: required, valid email format, max 255 chars
+  - password: required, min 6 chars, max 128 chars
+Success Response (200):
+{
+    "success": true,
+    "message": "تم تسجيل الدخول بنجاح",
+    "data": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+        "user": {
+            "id": 1,
+            "name": "أحمد محمد",
+            "email": "ahmed@example.com",
+            "role": "landlord",
+            "hasPin": false
+        }
+    }
+}
+Validation Error Response (400):
+{
+    "success": false,
+    "message": "بيانات الدخول غير صالحة",
+    "errors": [
+        { "field": "email", "message": "البريد الإلكتروني مطلوب" },
+        { "field": "password", "message": "كلمة المرور يجب أن تكون 6 أحرف على الأقل" }
+    ]
+}
+Authentication Error Response (401):
+{
+    "success": false,
+    "message": "البريد الإلكتروني أو كلمة المرور غير صحيحة"
+}
+Server Error Response (500):
+{
+    "success": false,
+    "message": "حدث خطأ في الخادم. الرجاء المحاولة لاحقاً."
+}
+
+----------------------------------------------------------------------
+POST /api/auth/verify-pin
+----------------------------------------------------------------------
+Description: Verify 4-digit PIN after successful login. Required if user.hasPin is true.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "pin": "1234"
+}
+Validation Rules:
+  - pin: required, exactly 4 digits, string
+Success Response (200):
+{
+    "success": true,
+    "message": "تم التحقق من الرقم السري بنجاح",
+    "data": {
+        "verified": true
+    }
+}
+Validation Error Response (422):
+{
+    "success": false,
+    "message": "الرقم السري غير صحيح",
+    "errors": [
+        { "field": "pin", "message": "الرقم السري يجب أن يكون 4 أرقام" }
+    ]
+}
+Lockout Response (429):
+{
+    "success": false,
+    "message": "تم قفل الدخول مؤقتاً. حاول بعد 5 دقائق.",
+    "data": {
+        "lockedUntil": "2026-06-06T12:05:00Z"
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/auth/change-pin
+----------------------------------------------------------------------
+Description: Change or disable the 4-digit PIN.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body (enable or change PIN):
+{
+    "currentPin": "1234",
+    "newPin": "5678",
+    "confirmPin": "5678"
+}
+Request Body (disable PIN):
+{
+    "currentPin": "1234",
+    "newPin": null,
+    "confirmPin": null
+}
+Validation Rules:
+  - currentPin: required, exactly 4 digits
+  - newPin: optional, exactly 4 digits if provided; null to disable
+  - confirmPin: must match newPin if newPin is provided
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث الرقم السري بنجاح"
+}
+Error Response (400):
+{
+    "success": false,
+    "message": "الرقمان غير متطابقين"
+}
+Error Response (401):
+{
+    "success": false,
+    "message": "الرقم السري الحالي غير صحيح"
+}
+
+----------------------------------------------------------------------
+2.2 Dashboard Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/dashboard/summary
+----------------------------------------------------------------------
+Description: Return all key metrics for the dashboard screen.
+Headers: Authorization: Bearer <token>
+Query Parameters: none
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "totalProperties": 3,
+        "totalUnits": 15,
+        "occupiedUnits": 12,
+        "vacantUnits": 3,
+        "expectedMonthlyRent": 45000.00,
+        "currentMonthCollected": 32000.00,
+        "currentMonthExpenses": 5200.00,
+        "overdueCount": 2,
+        "overdueTotal": 4000.00,
+        "upcomingInvoices": [
+            {
+                "id": 45,
+                "invoiceNumber": "INV-2026-06-012",
+                "amount": 2000.00,
+                "dueDate": "2026-06-10",
+                "tenantName": "محمد عبدالله السالم",
+                "unitNumber": "101",
+                "propertyName": "عمارة الملك فهد"
+            }
+        ]
+    }
+}
+Error Response (401):
+{
+    "success": false,
+    "message": "انتهت صلاحية الجلسة. يرجى تسجيل الدخول مرة أخرى."
+}
+
+----------------------------------------------------------------------
+2.3 Property Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/properties
+----------------------------------------------------------------------
+Description: List all properties for the authenticated user.
+Headers: Authorization: Bearer <token>
+Query Parameters: none
+Success Response (200):
+{
+    "success": true,
+    "data": [
+        {
+            "id": 1,
+            "name": "عمارة الملك فهد",
+            "city": "الرياض - حي النزهة",
+            "notes": null,
+            "unitCount": 6,
+            "occupiedCount": 5,
+            "createdAt": "2026-01-15T08:00:00Z",
+            "updatedAt": "2026-06-01T10:30:00Z"
+        }
+    ]
+}
+
+----------------------------------------------------------------------
+GET /api/properties/:id
+----------------------------------------------------------------------
+Description: Get a single property with full details and its units.
+Headers: Authorization: Bearer <token>
+URL Parameters: id (integer, required)
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 1,
+        "name": "عمارة الملك فهد",
+        "city": "الرياض - حي النزهة",
+        "notes": "ملاحظة اختيارية",
+        "createdAt": "2026-01-15T08:00:00Z",
+        "updatedAt": "2026-06-01T10:30:00Z",
+        "units": [
+            {
+                "id": 1,
+                "unitNumber": "101",
+                "type": "Apartment",
+                "floor": 1,
+                "monthlyRent": 2000.00,
+                "status": "Occupied",
+                "tenantName": "محمد عبدالله السالم"
+            }
+        ]
+    }
+}
+Error Response (404):
+{
+    "success": false,
+    "message": "العقار غير موجود"
+}
+
+----------------------------------------------------------------------
+POST /api/properties
+----------------------------------------------------------------------
+Description: Create a new property and auto-generate units.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "name": "عمارة الملك فهد",
+    "city": "الرياض - حي النزهة",
+    "unitCount": 6,
+    "notes": ""
+}
+Validation Rules:
+  - name: required, 2-100 chars, trimmed, escaped
+  - city: required, 2-100 chars, trimmed, escaped
+  - unitCount: required, integer 1-100
+  - notes: optional, max 500 chars
+Success Response (201):
+{
+    "success": true,
+    "message": "✓ تم إضافة العقار بنجاح",
+    "data": {
+        "id": 1,
+        "name": "عمارة الملك فهد",
+        "city": "الرياض - حي النزهة",
+        "unitCount": 6,
+        "units": [
+            { "id": 1, "unitNumber": "وحدة 1" },
+            { "id": 2, "unitNumber": "وحدة 2" },
+            { "id": 3, "unitNumber": "وحدة 3" },
+            { "id": 4, "unitNumber": "وحدة 4" },
+            { "id": 5, "unitNumber": "وحدة 5" },
+            { "id": 6, "unitNumber": "وحدة 6" }
+        ]
+    }
+}
+Error Response (409):
+{
+    "success": false,
+    "message": "يوجد عقار بنفس الاسم بالفعل. اختر اسماً آخر.",
+    "errors": [
+        { "field": "name", "message": "اسم العقار مكرر" }
+    ]
+}
+Error Response (422):
+{
+    "success": false,
+    "message": "بيانات الإدخال غير صالحة",
+    "errors": [
+        { "field": "name", "message": "اسم العقار مطلوب ويجب ألا يقل عن حرفين" },
+        { "field": "unitCount", "message": "عدد الوحدات يجب أن يكون بين 1 و 100" }
+    ]
+}
+
+----------------------------------------------------------------------
+PUT /api/properties/:id
+----------------------------------------------------------------------
+Description: Update an existing property.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "name": "عمارة الملك عبدالله",
+    "city": "الرياض - حي العليا",
+    "notes": "تم التجديد"
+}
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث العقار بنجاح",
+    "data": {
+        "id": 1,
+        "name": "عمارة الملك عبدالله",
+        "city": "الرياض - حي العليا",
+        "notes": "تم التجديد"
+    }
+}
+
+----------------------------------------------------------------------
+DELETE /api/properties/:id
+----------------------------------------------------------------------
+Description: Delete a property and all associated units (CASCADE).
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم حذف العقار وجميع الوحدات المرتبطة به بنجاح"
+}
+Error Response (404):
+{
+    "success": false,
+    "message": "العقار غير موجود"
+}
+
+----------------------------------------------------------------------
+2.4 Unit Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/properties/:id/units
+----------------------------------------------------------------------
+Description: List all units for a specific property.
+Headers: Authorization: Bearer <token>
+URL Parameters: id (property id, required)
+Success Response (200):
+{
+    "success": true,
+    "data": [
+        {
+            "id": 1,
+            "propertyId": 1,
+            "unitNumber": "101",
+            "type": "Apartment",
+            "floor": 1,
+            "monthlyRent": 2000.00,
+            "status": "Occupied",
+            "tenantName": "محمد عبدالله السالم",
+            "createdAt": "2026-01-15T08:00:00Z",
+            "updatedAt": "2026-06-01T10:30:00Z"
+        }
+    ]
+}
+
+----------------------------------------------------------------------
+GET /api/units/:id
+----------------------------------------------------------------------
+Description: Get a single unit with full details, including current tenant and contract info.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 1,
+        "propertyId": 1,
+        "propertyName": "عمارة الملك فهد",
+        "unitNumber": "101",
+        "type": "Apartment",
+        "floor": 1,
+        "monthlyRent": 2000.00,
+        "status": "Occupied",
+        "currentTenant": {
+            "id": 3,
+            "fullName": "محمد عبدالله السالم",
+            "phone": "+966555123456"
+        },
+        "currentContract": {
+            "id": 2,
+            "startDate": "2026-03-01",
+            "endDate": null,
+            "status": "Active"
+        }
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/properties/:id/units
+----------------------------------------------------------------------
+Description: Add a single unit to a property.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "unitNumber": "102",
+    "type": "Apartment",
+    "floor": 1,
+    "monthlyRent": 2500.00,
+    "status": "Vacant"
+}
+Success Response (201):
+{
+    "success": true,
+    "message": "✓ تم إضافة الوحدة بنجاح",
+    "data": {
+        "id": 7,
+        "propertyId": 1,
+        "unitNumber": "102",
+        "type": "Apartment",
+        "floor": 1,
+        "monthlyRent": 2500.00,
+        "status": "Vacant"
+    }
+}
+Error Response (409):
+{
+    "success": false,
+    "message": "رقم الوحدة موجود مسبقاً في هذا العقار. اختر رقماً آخر.",
+    "errors": [
+        { "field": "unitNumber", "message": "رقم الوحدة مكرر" }
+    ]
+}
+
+----------------------------------------------------------------------
+PUT /api/units/:id
+----------------------------------------------------------------------
+Description: Update unit details.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body (all fields optional, only included fields updated):
+{
+    "unitNumber": "102-A",
+    "monthlyRent": 2600.00
+}
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث الوحدة بنجاح",
+    "data": { "id": 7, "unitNumber": "102-A", "monthlyRent": 2600.00 }
+}
+
+----------------------------------------------------------------------
+DELETE /api/units/:id
+----------------------------------------------------------------------
+Description: Delete a unit. Fails if unit has an active contract.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم حذف الوحدة بنجاح"
+}
+Error Response (409):
+{
+    "success": false,
+    "message": "لا يمكن حذف الوحدة. يوجد عقد نشط مرتبط بها. قم بإنهاء العقد أولاً."
+}
+
+----------------------------------------------------------------------
+PATCH /api/units/:id/status
+----------------------------------------------------------------------
+Description: Change unit status. When changing from Vacant to Occupied,
+the tenant linking is handled by the tenant creation endpoint separately.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "status": "UnderMaintenance"
+}
+Validation Rules:
+  - status: required, must be one of 'Vacant', 'Occupied', 'UnderMaintenance'
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تغيير حالة الوحدة إلى تحت الصيانة",
+    "data": {
+        "id": 1,
+        "status": "UnderMaintenance",
+        "updatedAt": "2026-06-06T12:00:00Z"
+    }
+}
+
+----------------------------------------------------------------------
+2.5 Tenant Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/tenants
+----------------------------------------------------------------------
+Description: List tenants. Supports filtering.
+Headers: Authorization: Bearer <token>
+Query Parameters:
+  - former (optional): "0" for current tenants only, "1" for former only,
+                        omitted for all
+  - search (optional): search term for full_name (LIKE %term%)
+  - page (optional): page number, default 1
+  - limit (optional): items per page, default 50, max 200
+  - sort (optional): "name" or "createdAt", default "name"
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "tenants": [
+            {
+                "id": 3,
+                "fullName": "محمد عبدالله السالم",
+                "phone": "+966555123456",
+                "secondaryPhone": null,
+                "nationalId": "1234567890",
+                "notes": null,
+                "isFormer": false,
+                "unitNumber": "101",
+                "propertyName": "عمارة الملك فهد",
+                "createdAt": "2026-03-01T08:00:00Z"
+            }
+        ],
+        "pagination": {
+            "page": 1,
+            "limit": 50,
+            "total": 12,
+            "totalPages": 1
+        }
+    }
+}
+
+----------------------------------------------------------------------
+GET /api/tenants/search
+----------------------------------------------------------------------
+Description: Quick search tenants by name (real-time filtering).
+Headers: Authorization: Bearer <token>
+Query Parameters:
+  - q (required): search term, at least 2 characters
+  - former (optional): include former tenants (0 or 1, default 0)
+Success Response (200):
+{
+    "success": true,
+    "data": [
+        {
+            "id": 3,
+            "fullName": "محمد عبدالله السالم",
+            "phone": "+966555123456",
+            "unitNumber": "101",
+            "propertyName": "عمارة الملك فهد",
+            "isFormer": false
+        }
+    ]
+}
+Error Response (422):
+{
+    "success": false,
+    "message": "يجب إدخال حرفين على الأقل للبحث",
+    "errors": [
+        { "field": "q", "message": "حقل البحث يجب أن يكون حرفين على الأقل" }
+    ]
+}
+
+----------------------------------------------------------------------
+GET /api/tenants/:id
+----------------------------------------------------------------------
+Description: Get tenant details with contract history.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 3,
+        "fullName": "محمد عبدالله السالم",
+        "phone": "+966555123456",
+        "secondaryPhone": null,
+        "nationalId": "1234567890",
+        "notes": "يدفع متأخر دائماً",
+        "isFormer": false,
+        "userAccountId": null,
+        "createdAt": "2026-03-01T08:00:00Z",
+        "contracts": [
+            {
+                "id": 2,
+                "unitNumber": "101",
+                "propertyName": "عمارة الملك فهد",
+                "startDate": "2026-03-01",
+                "endDate": null,
+                "monthlyRent": 2000.00,
+                "status": "Active"
+            }
+        ]
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/tenants
+----------------------------------------------------------------------
+Description: Register a new tenant, assign to a unit, and create a contract.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "fullName": "محمد عبدالله السالم",
+    "phone": "+966555123456",
+    "secondaryPhone": "",
+    "nationalId": "1234567890",
+    "unitId": 1,
+    "notes": ""
+}
+Validation Rules:
+  - fullName: required, 2-100 chars, Arabic/English letters, spaces, hyphens
+  - phone: required, 7-20 chars, digits and optional leading +
+  - secondaryPhone: optional, same format
+  - nationalId: optional, 5-20 chars
+  - unitId: required, integer, must reference an existing Vacant unit
+  - notes: optional, max 500 chars
+Success Response (201):
+{
+    "success": true,
+    "message": "✓ تم تسجيل المستأجر بنجاح وبدء العقد",
+    "data": {
+        "tenant": {
+            "id": 3,
+            "fullName": "محمد عبدالله السالم",
+            "phone": "+966555123456"
+        },
+        "unit": {
+            "id": 1,
+            "unitNumber": "101",
+            "status": "Occupied"
+        },
+        "contract": {
+            "id": 2,
+            "startDate": "2026-06-06",
+            "monthlyRent": 2000.00,
+            "status": "Active"
+        }
+    }
+}
+Error Response (409):
+{
+    "success": false,
+    "message": "الوحدة غير متاحة للتأجير. الحالة الحالية: تحت الصيانة",
+    "errors": [
+        { "field": "unitId", "message": "الوحدة غير شاغرة" }
+    ]
+}
+
+----------------------------------------------------------------------
+PUT /api/tenants/:id
+----------------------------------------------------------------------
+Description: Update tenant personal information.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body (all fields optional):
+{
+    "fullName": "محمد عبدالله السالم المطيري",
+    "phone": "+966555999999",
+    "secondaryPhone": "+966555888888",
+    "nationalId": "1098765432",
+    "notes": "تم تحديث رقم الجوال"
+}
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث بيانات المستأجر بنجاح",
+    "data": { "id": 3, "fullName": "محمد عبدالله السالم المطيري" }
+}
+
+----------------------------------------------------------------------
+DELETE /api/tenants/:id
+----------------------------------------------------------------------
+Description: Delete a tenant record. Fails if tenant has an active contract.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم حذف المستأجر بنجاح"
+}
+Error Response (409):
+{
+    "success": false,
+    "message": "لا يمكن حذف المستأجر. يوجد عقد نشط. قم بإنهاء العقد أولاً."
+}
+
+----------------------------------------------------------------------
+2.6 Contract Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/contracts
+----------------------------------------------------------------------
+Description: List all contracts with related data.
+Headers: Authorization: Bearer <token>
+Query Parameters:
+  - status (optional): "Active", "Expired", "Terminated"
+  - unitId (optional): filter by unit
+  - tenantId (optional): filter by tenant
+  - page, limit (optional): pagination
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "contracts": [
+            {
+                "id": 2,
+                "tenantId": 3,
+                "tenantName": "محمد عبدالله السالم",
+                "unitId": 1,
+                "unitNumber": "101",
+                "propertyName": "عمارة الملك فهد",
+                "startDate": "2026-03-01",
+                "endDate": null,
+                "monthlyRent": 2000.00,
+                "status": "Active"
+            }
+        ],
+        "pagination": {
+            "page": 1,
+            "limit": 50,
+            "total": 8,
+            "totalPages": 1
+        }
+    }
+}
+
+----------------------------------------------------------------------
+GET /api/contracts/:id
+----------------------------------------------------------------------
+Description: Get contract details with all its invoices.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 2,
+        "tenantName": "محمد عبدالله السالم",
+        "tenantPhone": "+966555123456",
+        "unitNumber": "101",
+        "propertyName": "عمارة الملك فهد",
+        "startDate": "2026-03-01",
+        "endDate": null,
+        "monthlyRent": 2000.00,
+        "status": "Active",
+        "invoices": [
+            {
+                "id": 15,
+                "invoiceNumber": "INV-2026-03-001",
+                "billingMonth": 3,
+                "billingYear": 2026,
+                "amount": 2000.00,
+                "dueDate": "2026-03-05",
+                "status": "Paid"
+            }
+        ]
+    }
+}
+
+----------------------------------------------------------------------
+PATCH /api/contracts/:id/terminate
+----------------------------------------------------------------------
+Description: Terminate an active contract. Unit becomes vacant.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "terminationDate": "2026-06-30",
+    "reason": "انتقال المستأجر"
+}
+Validation Rules:
+  - terminationDate: required, valid date, not before start_date, not in future
+  - reason: optional, max 250 chars
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم إنهاء العقد بنجاح. الوحدة الآن شاغرة.",
+    "data": {
+        "contractId": 2,
+        "status": "Terminated",
+        "endDate": "2026-06-30",
+        "unitStatus": "Vacant"
+    }
+}
+Error Response (400):
+{
+    "success": false,
+    "message": "العقد غير نشط أو منتهي بالفعل"
+}
+Warning Response (200 with warning about unpaid invoices):
+{
+    "success": true,
+    "warning": "يوجد فواتير غير مدفوعة لهذا العقد. سيتم إنهاء العقد مع بقاء الفواتير غير مدفوعة.",
+    "message": "✓ تم إنهاء العقد بنجاح",
+    "data": { ... }
+}
+
+----------------------------------------------------------------------
+2.7 Invoice Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/invoices
+----------------------------------------------------------------------
+Description: List invoices with filtering and pagination.
+Headers: Authorization: Bearer <token>
+Query Parameters:
+  - month (optional): 1-12, defaults to current month
+  - year (optional): 4-digit, defaults to current year
+  - status (optional): "Unpaid", "Paid", "Partial", "Overdue", "Cancelled"
+  - contractId (optional): filter by contract
+  - tenantId (optional): filter by tenant
+  - unitId (optional): filter by unit
+  - page, limit (optional): pagination
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "invoices": [
+            {
+                "id": 45,
+                "invoiceNumber": "INV-2026-06-012",
+                "contractId": 2,
+                "unitNumber": "101",
+                "propertyName": "عمارة الملك فهد",
+                "tenantName": "محمد عبدالله السالم",
+                "billingMonth": 6,
+                "billingYear": 2026,
+                "amount": 2000.00,
+                "paidAmount": 2000.00,
+                "remainingAmount": 0.00,
+                "dueDate": "2026-06-05",
+                "status": "Paid",
+                "createdAt": "2026-06-01T00:00:00Z"
+            }
+        ],
+        "summary": {
+            "totalCount": 15,
+            "totalAmount": 30000.00,
+            "totalPaid": 22000.00,
+            "totalOutstanding": 8000.00
+        },
+        "pagination": {
+            "page": 1,
+            "limit": 50,
+            "total": 15,
+            "totalPages": 1
+        }
+    }
+}
+
+----------------------------------------------------------------------
+GET /api/invoices/:id
+----------------------------------------------------------------------
+Description: Get invoice details with payment history.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 45,
+        "invoiceNumber": "INV-2026-06-012",
+        "contractId": 2,
+        "unitNumber": "101",
+        "propertyName": "عمارة الملك فهد",
+        "tenantName": "محمد عبدالله السالم",
+        "billingMonth": 6,
+        "billingYear": 2026,
+        "amount": 2000.00,
+        "paidAmount": 1500.00,
+        "remainingAmount": 500.00,
+        "dueDate": "2026-06-05",
+        "status": "Partial",
+        "notes": null,
+        "createdAt": "2026-06-01T00:00:00Z",
+        "payments": [
+            {
+                "id": 8,
+                "amount": 1500.00,
+                "paymentDate": "2026-06-03",
+                "paymentMethod": "Cash",
+                "notes": "دفعة أولى"
+            }
+        ]
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/invoices
+----------------------------------------------------------------------
+Description: Manually create a one-time invoice (non-rent charges).
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "contractId": 2,
+    "amount": 500.00,
+    "dueDate": "2026-06-20",
+    "description": "فاتورة مياه"
+}
+Validation Rules:
+  - contractId: required, must reference an active contract
+  - amount: required, > 0, <= 999999999
+  - dueDate: required, valid date, not in the past
+  - description: required, 3-250 chars
+Success Response (201):
+{
+    "success": true,
+    "message": "✓ تم إنشاء الفاتورة الإضافية بنجاح",
+    "data": {
+        "id": 46,
+        "invoiceNumber": "INV-2026-06-013",
+        "amount": 500.00,
+        "dueDate": "2026-06-20",
+        "status": "Unpaid"
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/invoices/trigger
+----------------------------------------------------------------------
+Description: Manually trigger the invoice generation cron job (admin/developer).
+Headers: Authorization: Bearer <token>
+Request Body (optional):
+{
+    "month": 6,
+    "year": 2026,
+    "targetUserId": null
+}
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم توليد الفواتير بنجاح",
+    "data": {
+        "invoicesGenerated": 12,
+        "month": 6,
+        "year": 2026
+    }
+}
+
+----------------------------------------------------------------------
+2.8 Payment Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+POST /api/invoices/:id/payments
+----------------------------------------------------------------------
+Description: Record a payment against an invoice.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "amount": 2000.00,
+    "paymentDate": "2026-06-05",
+    "paymentMethod": "Cash",
+    "notes": ""
+}
+Validation Rules:
+  - amount: required, > 0, <= remaining balance on invoice
+  - paymentDate: required, valid date, not in the future
+  - paymentMethod: required, one of 'Cash', 'BankTransfer', 'Cheque'
+  - notes: optional, max 250 chars
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تسجيل الدفع بنجاح",
+    "data": {
+        "payment": {
+            "id": 9,
+            "amount": 2000.00,
+            "paymentDate": "2026-06-05",
+            "paymentMethod": "Cash",
+            "notes": null
+        },
+        "invoice": {
+            "id": 45,
+            "status": "Paid",
+            "paidAmount": 2000.00,
+            "remainingAmount": 0.00
+        }
+    }
+}
+Error Response (422):
+{
+    "success": false,
+    "message": "المبلغ المدفوع أكبر من المبلغ المتبقي. المتبقي: 500.00 ر.س",
+    "errors": [
+        { "field": "amount", "message": "المبلغ يتجاوز المتبقي" }
+    ]
+}
+Error Response (400):
+{
+    "success": false,
+    "message": "هذه الفاتورة مدفوعة بالكامل بالفعل"
+}
+
+----------------------------------------------------------------------
+2.9 Expense Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/expenses
+----------------------------------------------------------------------
+Description: List expenses with filtering.
+Headers: Authorization: Bearer <token>
+Query Parameters:
+  - type (optional): filter by expense type
+  - propertyId (optional): filter by property
+  - unitId (optional): filter by unit
+  - fromDate (optional): ISO date, filter expenses on or after this date
+  - toDate (optional): ISO date, filter expenses on or before this date
+  - page, limit (optional): pagination
+  - sort (optional): "date" or "amount" or "createdAt", default "date"
+  - order (optional): "asc" or "desc", default "desc"
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "expenses": [
+            {
+                "id": 25,
+                "type": "Maintenance",
+                "amount": 500.00,
+                "date": "2026-06-10",
+                "description": "إصلاح تسريب مياه",
+                "propertyName": "عمارة الملك فهد",
+                "unitNumber": "101",
+                "hasReceiptImage": true,
+                "receiptImageUrl": "/api/files/receipts/1717600000_receipt.jpg",
+                "createdAt": "2026-06-10T14:30:00Z"
+            }
+        ],
+        "summary": {
+            "totalCount": 5,
+            "totalAmount": 3200.00,
+            "byType": {
+                "Maintenance": 1200.00,
+                "Utilities": 1500.00,
+                "Cleaning": 500.00
+            }
+        },
+        "pagination": {
+            "page": 1,
+            "limit": 50,
+            "total": 5,
+            "totalPages": 1
+        }
+    }
+}
+
+----------------------------------------------------------------------
+GET /api/expenses/:id
+----------------------------------------------------------------------
+Description: Get a single expense detail.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 25,
+        "type": "Maintenance",
+        "amount": 500.00,
+        "date": "2026-06-10",
+        "propertyId": 1,
+        "propertyName": "عمارة الملك فهد",
+        "unitId": 1,
+        "unitNumber": "101",
+        "description": "إصلاح تسريب مياه في الحمام",
+        "receiptImagePath": "/uploads/receipts/1717600000_receipt.jpg",
+        "receiptImageUrl": "/api/files/receipts/1717600000_receipt.jpg",
+        "createdAt": "2026-06-10T14:30:00Z",
+        "updatedAt": "2026-06-10T14:30:00Z"
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/expenses
+----------------------------------------------------------------------
+Description: Create a new expense with optional receipt image.
+Headers: Authorization: Bearer <token>, Content-Type: multipart/form-data
+Request Body (multipart/form-data fields):
+  - type: string (required)
+  - amount: number (required)
+  - date: string (required, ISO date)
+  - propertyId: number (optional)
+  - unitId: number (optional)
+  - description: string (required, 3-500 chars)
+  - receiptImage: file (optional, jpg/png/pdf, max 5MB)
+Success Response (201):
+{
+    "success": true,
+    "message": "✓ تم تسجيل المصروف بنجاح",
+    "data": {
+        "id": 26,
+        "type": "Maintenance",
+        "amount": 500.00,
+        "date": "2026-06-10",
+        "description": "إصلاح تسريب مياه",
+        "hasReceiptImage": true,
+        "receiptImageUrl": "/api/files/receipts/1717600000_receipt.jpg"
+    }
+}
+Error Response (413):
+{
+    "success": false,
+    "message": "الملف كبير جداً. الحد الأقصى 5 ميجابايت.",
+    "errors": [
+        { "field": "receiptImage", "message": "حجم الملف يتجاوز 5 ميجابايت" }
+    ]
+}
+Error Response (415):
+{
+    "success": false,
+    "message": "نوع الملف غير مسموح. الأنواع المسموحة: JPG, PNG, PDF.",
+    "errors": [
+        { "field": "receiptImage", "message": "نوع الملف غير مدعوم" }
+    ]
+}
+
+----------------------------------------------------------------------
+PUT /api/expenses/:id
+----------------------------------------------------------------------
+Description: Update an existing expense. Replace receipt image if new file provided.
+Headers: Authorization: Bearer <token>, Content-Type: multipart/form-data
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث المصروف بنجاح",
+    "data": { "id": 26, "amount": 550.00 }
+}
+
+----------------------------------------------------------------------
+DELETE /api/expenses/:id
+----------------------------------------------------------------------
+Description: Delete an expense record. Server also deletes the associated file if present.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم حذف المصروف بنجاح"
+}
+
+----------------------------------------------------------------------
+2.10 Maintenance Ticket Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/maintenance-tickets
+----------------------------------------------------------------------
+Description: List maintenance tickets sorted by urgency then date.
+Headers: Authorization: Bearer <token>
+Query Parameters:
+  - status (optional): "Open", "InProgress", "Resolved"
+  - urgency (optional): "Low", "Medium", "High", "Emergency"
+  - unitId (optional): filter by unit
+  - page, limit (optional): pagination
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "tickets": [
+            {
+                "id": 5,
+                "unitId": 1,
+                "unitNumber": "101",
+                "propertyName": "عمارة الملك فهد",
+                "reportedBy": "محمد عبدالله السالم",
+                "description": "تسريب مياه في الحمام",
+                "urgency": "Emergency",
+                "status": "Open",
+                "hasIssueImage": false,
+                "createdAt": "2026-06-06T08:00:00Z"
+            }
+        ],
+        "pagination": {
+            "page": 1,
+            "limit": 50,
+            "total": 3,
+            "totalPages": 1
+        }
+    }
+}
+
+----------------------------------------------------------------------
+GET /api/maintenance-tickets/:id
+----------------------------------------------------------------------
+Description: Get ticket details.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "id": 5,
+        "unitId": 1,
+        "unitNumber": "101",
+        "propertyName": "عمارة الملك فهد",
+        "reportedBy": "محمد عبدالله السالم",
+        "description": "تسريب مياه في الحمام. يبدو أن هناك كسر في أنبوب المياه الرئيسي.",
+        "urgency": "Emergency",
+        "status": "Open",
+        "issueImageUrl": null,
+        "resolvedAt": null,
+        "createdAt": "2026-06-06T08:00:00Z",
+        "updatedAt": "2026-06-06T08:00:00Z"
+    }
+}
+
+----------------------------------------------------------------------
+POST /api/maintenance-tickets
+----------------------------------------------------------------------
+Description: Create a new maintenance ticket with optional photo.
+Headers: Authorization: Bearer <token>, Content-Type: multipart/form-data
+Request Body (multipart/form-data fields):
+  - unitId: number (required)
+  - reportedBy: string (required, 2-100 chars)
+  - description: string (required, 10-2000 chars)
+  - urgency: string (required, one of 'Low','Medium','High','Emergency')
+  - issueImage: file (optional, jpg/png, max 5MB)
+Success Response (201):
+{
+    "success": true,
+    "message": "✓ تم إضافة تذكرة الصيانة بنجاح",
+    "data": {
+        "id": 6,
+        "status": "Open",
+        "urgency": "High",
+        "unitId": 1
+    }
+}
+
+----------------------------------------------------------------------
+PATCH /api/maintenance-tickets/:id/status
+----------------------------------------------------------------------
+Description: Update ticket status following sequence: Open -> InProgress -> Resolved.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "status": "InProgress"
+}
+Validation Rules:
+  - status: required, one of 'Open', 'InProgress', 'Resolved'
+  - Must follow sequence: Open -> InProgress -> Resolved (no skipping, no going back except Resolved -> Open via reopen)
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث حالة التذكرة إلى قيد التنفيذ",
+    "data": {
+        "id": 6,
+        "status": "InProgress",
+        "updatedAt": "2026-06-06T09:00:00Z"
+    }
+}
+Error Response (400):
+{
+    "success": false,
+    "message": "يجب تغيير الحالة إلى قيد التنفيذ أولاً",
+    "errors": [
+        { "field": "status", "message": "لا يمكن الانتقال من مفتوحة إلى تم الحل مباشرة" }
+    ]
+}
+
+----------------------------------------------------------------------
+DELETE /api/maintenance-tickets/:id
+----------------------------------------------------------------------
+Description: Delete a maintenance ticket (only if status is Open or Resolved).
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم حذف تذكرة الصيانة بنجاح"
+}
+Error Response (409):
+{
+    "success": false,
+    "message": "لا يمكن حذف تذكرة صيانة قيد التنفيذ. قم بإكمالها أو إلغائها أولاً."
+}
+
+----------------------------------------------------------------------
+2.11 Settings Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/settings
+----------------------------------------------------------------------
+Description: Get all settings for the authenticated user.
+Headers: Authorization: Bearer <token>
+Success Response (200):
+{
+    "success": true,
+    "data": {
+        "settings": {
+            "currency": "SAR",
+            "billingDay": "1",
+            "dueDay": "5",
+            "fontSize": "extraLarge",
+            "pinEnabled": "true"
+        }
+    }
+}
+
+----------------------------------------------------------------------
+PATCH /api/settings
+----------------------------------------------------------------------
+Description: Update a single setting key-value pair.
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "key": "currency",
+    "value": "SDG"
+}
+Validation Rules:
+  - key: required, must be one of the defined setting keys
+  - value: required, must be a valid value for the given key
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم تحديث الإعداد بنجاح",
+    "data": {
+        "key": "currency",
+        "value": "SDG"
+    }
+}
+Error Response (422):
+{
+    "success": false,
+    "message": "قيمة الإعداد غير صالحة",
+    "errors": [
+        { "field": "value", "message": "العملة غير مدعومة. الخيارات: SAR, SDG" }
+    ]
+}
+
+----------------------------------------------------------------------
+2.12 Backup & Restore Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/backup/export
+----------------------------------------------------------------------
+Description: Export all user data as a downloadable JSON file.
+Headers: Authorization: Bearer <token>
+Response Headers:
+  Content-Type: application/json
+  Content-Disposition: attachment; filename="pms_backup_2026-06-06.json"
+Success Response (200): Raw JSON file stream with all user data.
+
+----------------------------------------------------------------------
+POST /api/backup/restore
+----------------------------------------------------------------------
+Description: Restore data from a previously exported backup JSON file.
+Headers: Authorization: Bearer <token>, Content-Type: multipart/form-data
+Request Body (multipart/form-data):
+  - backupFile: file (required, .json, max 50MB)
+Success Response (200):
+{
+    "success": true,
+    "message": "✓ تم استعادة البيانات بنجاح. سيتم إعادة تحميل الصفحة."
+}
+Error Response (422):
+{
+    "success": false,
+    "message": "ملف النسخة الاحتياطية غير صالح أو تالف."
+}
+Error Response (400):
+{
+    "success": false,
+    "message": "ملف النسخة الاحتياطية لا ينتمي إلى هذا الحساب."
+}
+Error Response (413):
+{
+    "success": false,
+    "message": "حجم الملف كبير جداً. الحد الأقصى 50 ميجابايت."
+}
+
+----------------------------------------------------------------------
+2.13 File Serving Endpoints
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+GET /api/files/receipts/:filename
+----------------------------------------------------------------------
+Description: Serve a receipt image file. Authentication required.
+Headers: Authorization: Bearer <token>
+URL Parameters: filename (string, the stored file name)
+Success Response (200): File stream with appropriate Content-Type header
+(image/jpeg, image/png, or application/pdf).
+Error Response (404):
+{
+    "success": false,
+    "message": "الملف غير موجود"
+}
+
+----------------------------------------------------------------------
+GET /api/files/maintenance/:filename
+----------------------------------------------------------------------
+Description: Serve a maintenance issue image file.
+Headers: Authorization: Bearer <token>
+URL Parameters: filename (string)
+Success Response (200): File stream.
+Error Response (404):
+{
+    "success": false,
+    "message": "الملف غير موجود"
+}
+
+----------------------------------------------------------------------
+2.14 Synchronization Endpoint (POST /api/sync)
+----------------------------------------------------------------------
+
+Description: This endpoint accepts a batch of mutations performed by the
+client while offline (e.g., on a PWA with IndexedDB local storage). The
+server applies each mutation in order, detects conflicts based on
+timestamps, and returns a result for each operation. This endpoint is
+critical for future offline-capable versions of the app and is included
+in Phase 3 architecture to ensure the data layer supports it from the
+start, even if the Phase 2 frontend does not yet implement offline sync.
+
+Headers: Authorization: Bearer <token>, Content-Type: application/json
+Request Body:
+{
+    "syncId": "sync_abc123",
+    "mutations": [
+        {
+            "clientMutationId": "cm_001",
+            "entityType": "expense",
+            "operation": "create",
+            "entityData": {
+                "type": "Maintenance",
+                "amount": 350.00,
+                "date": "2026-06-05",
+                "propertyId": 1,
+                "description": "تغيير فلتر مياه",
+                "receiptImagePath": null
+            },
+            "clientTimestamp": "2026-06-05T14:30:00Z"
+        },
+        {
+            "clientMutationId": "cm_002",
+            "entityType": "invoice",
+            "operation": "update",
+            "entityId": 45,
+            "entityData": {
+                "status": "Paid"
+            },
+            "clientTimestamp": "2026-06-05T14:31:00Z",
+            "expectedServerVersion": "2026-06-01T00:00:00Z"
+        },
+        {
+            "clientMutationId": "cm_003",
+            "entityType": "maintenance_ticket",
+            "operation": "delete",
+            "entityId": 12,
+            "clientTimestamp": "2026-06-05T14:32:00Z",
+            "expectedServerVersion": "2026-06-04T10:00:00Z"
+        }
+    ]
+}
+
+Validation Rules:
+  - syncId: required, unique identifier for this sync session (UUID)
+  - mutations: required, array of 1-100 mutation objects
+  - Each mutation object:
+    - clientMutationId: required, unique within this sync request
+    - entityType: required, one of the defined entity types
+    - operation: required, 'create', 'update', or 'delete'
+    - entityData: required for create/update, contains the fields to apply
+    - entityId: required for update/delete, the server entity ID
+    - clientTimestamp: required, ISO 8601 timestamp of when the mutation occurred client-side
+    - expectedServerVersion: optional, ISO 8601 timestamp; if the server's
+      updated_at for the record is newer than this, a conflict is declared
+
+Server Processing Logic (pseudo-code applied for each mutation in array order):
+
+  1. for each mutation in request.mutations:
+  2.     validate mutation structure and field types
+  3.     if validation fails, push error result for this clientMutationId
+  4.     lookup the record by entityType and entityId (for update/delete)
+  5.     if operation is 'create':
+  6.         determine ownership: all new records inherit user_id from JWT
+  7.         insert record into the appropriate table
+  8.         record the new server ID and server timestamp
+  9.         push success result with { serverId, serverTimestamp }
+  10.    if operation is 'update':
+  11.        if record not found, push error: "السجل غير موجود"
+  12.        if expectedServerVersion is provided:
+  13.            if record.updated_at > expectedServerVersion:
+  14.                // CONFLICT DETECTED: server version is newer than client expected
+  15.                // Apply conflict resolution strategy (client_wins by default)
+  16.                // Log conflict in sync_log table
+  17.                insert into sync_log (conflict_type = 'client_wins')
+  18.                apply the client's update regardless
+  19.                push result with { conflict: 'client_wins', serverTimestamp }
+  20.            else:
+  21.                apply the update, set updated_at = server timestamp
+  22.                push success result
+  23.        else (no expectedServerVersion):
+  24.            apply update directly (last-write-wins)
+  25.            push success result
+  26.    if operation is 'delete':
+  27.        if entityType has soft-delete support, mark as deleted
+  28.        otherwise, hard delete the record
+  29.        push success result
+  30.    catch any exception and push error result for this mutation
+  31. insert a single sync_log entry for this entire sync session
+  32. return the results array
+
+Success Response (200):
+{
+    "success": true,
+    "message": "تمت مزامنة {count} من التغييرات",
+    "data": {
+        "syncId": "sync_abc123",
+        "serverTimestamp": "2026-06-06T12:00:00Z",
+        "results": [
+            {
+                "clientMutationId": "cm_001",
+                "status": "success",
+                "serverId": 27,
+                "serverTimestamp": "2026-06-06T12:00:00Z",
+                "conflict": null
+            },
+            {
+                "clientMutationId": "cm_002",
+                "status": "success",
+                "conflict": "client_wins",
+                "serverTimestamp": "2026-06-06T12:00:00Z",
+                "message": "تم تطبيق التحديث مع تجاوز التعارض (إصدار العميل أحدث)"
+            },
+            {
+                "clientMutationId": "cm_003",
+                "status": "error",
+                "message": "السجل غير موجود. ربما تم حذفه بالفعل."
+            }
+        ],
+        "summary": {
+            "total": 3,
+            "success": 2,
+            "error": 1,
+            "conflicts": 1
+        }
+    }
+}
+
+Error Response (422):
+{
+    "success": false,
+    "message": "بيانات المزامنة غير صالحة",
+    "errors": [
+        { "field": "mutations[0].entityType", "message": "نوع الكيان غير معروف" }
+    ]
+}
+
+================================================================================
+3. SERVER-SIDE CRON JOB PSEUDO-CODE
+================================================================================
+
+File: src/jobs/invoiceGenerator.js
+
+----------------------------------------------------------------------
+3.1 Main Invoice Generation Function
+----------------------------------------------------------------------
+
+'use strict';
+
+const db = require('../db'); // better-sqlite3 instance
+const logger = require('../utils/logger');
+
+/**
+ * generateMonthlyInvoices
+ * Main entry point called by the cron scheduler and the manual trigger endpoint.
+ * Scans all active contracts and generates invoices for the current month
+ * if they do not already exist.
+ *
+ * @param {Object} options - Optional parameters (for manual trigger)
+ * @param {number} [options.month] - Override month (1-12), defaults to current
+ * @param {number} [options.year] - Override year, defaults to current
+ * @param {number|null} [options.targetUserId] - If set, only process this user
+ * @returns {{ invoicesGenerated: number, month: number, year: number }}
+ */
+function generateMonthlyInvoices(options = {}) {
+    const cronLogId = startCronLog();
+
+    try {
+        const now = new Date();
+        const billingMonth = options.month || (now.getMonth() + 1);
+        const billingYear = options.year || now.getFullYear();
+        const targetUserId = options.targetUserId || null;
+
+        logger.info(`[INVOICE_GEN] Starting generation for ${billingMonth}/${billingYear}`);
+
+        // Step 1: Retrieve all active contracts with related data
+        let contractQuery = `
+            SELECT
+                c.id AS contract_id,
+                c.tenant_id,
+                c.unit_id,
+                c.monthly_rent,
+                u.unit_number,
+                p.name AS property_name,
+                p.user_id,
+                t.full_name AS tenant_name
+            FROM contracts c
+            JOIN units u ON c.unit_id = u.id
+            JOIN properties p ON u.property_id = p.id
+            JOIN tenants t ON c.tenant_id = t.id
+            WHERE c.status = 'Active'
+              AND (c.end_date IS NULL OR c.end_date >= date('now'))
+        `;
+
+        const contractParams = [];
+
+        if (targetUserId) {
+            contractQuery += ' AND p.user_id = ?';
+            contractParams.push(targetUserId);
+        }
+
+        const contracts = db.prepare(contractQuery).all(...contractParams);
+
+        if (contracts.length === 0) {
+            logger.info('[INVOICE_GEN] No active contracts found. Skipping.');
+            completeCronLog(cronLogId, 'completed', 0);
+            return { invoicesGenerated: 0, month: billingMonth, year: billingYear };
+        }
+
+        // Step 2: Determine due day from settings for each user.
+        // Pre-fetch all settings in bulk for performance.
+        const userIds = [...new Set(contracts.map(c => c.user_id))];
+        const placeholders = userIds.map(() => '?').join(',');
+        const dueDaySettings = db.prepare(`
+            SELECT user_id, value
+            FROM settings
+            WHERE key = 'dueDay'
+              AND user_id IN (${placeholders})
+        `).all(...userIds);
+
+        const dueDayMap = {};
+        for (const row of dueDaySettings) {
+            dueDayMap[row.user_id] = parseInt(row.value, 10);
+        }
+
+        // Step 3: Process each contract and generate invoice if needed
+        let invoicesGenerated = 0;
+        const insertInvoice = db.prepare(`
+            INSERT INTO invoices
+                (contract_id, unit_id, tenant_id, invoice_number,
+                 billing_month, billing_year, amount, due_date, status,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid',
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `);
+
+        const checkExisting = db.prepare(`
+            SELECT id FROM invoices
+            WHERE contract_id = ?
+              AND billing_month = ?
+              AND billing_year = ?
+        `);
+
+        // Calculate next sequence number for invoice numbering
+        const getNextSeq = db.prepare(`
+            SELECT COALESCE(COUNT(*), 0) + 1 AS seq
+            FROM invoices
+            WHERE billing_month = ? AND billing_year = ?
+        `);
+
+        // Use a transaction for the entire batch
+        const generateBatch = db.transaction(() => {
+            for (const contract of contracts) {
+                // Check for existing invoice (idempotency)
+                const existing = checkExisting.get(
+                    contract.contract_id,
+                    billingMonth,
+                    billingYear
+                );
+
+                if (existing) {
+                    // Invoice already exists for this contract/month. Skip.
+                    continue;
+                }
+
+                // Calculate due date
+                const dueDay = dueDayMap[contract.user_id] || 5;
+                const daysInMonth = new Date(billingYear, billingMonth, 0).getDate();
+                const safeDueDay = Math.min(dueDay, daysInMonth);
+                const dueDateStr = `${billingYear}-${String(billingMonth).padStart(2, '0')}-${String(safeDueDay).padStart(2, '0')}`;
+
+                // Generate invoice number
+                const seqResult = getNextSeq.get(billingMonth, billingYear);
+                const seq = String(seqResult.seq).padStart(3, '0');
+                const invoiceNumber = `INV-${billingYear}-${String(billingMonth).padStart(2, '0')}-${seq}`;
+
+                // Insert invoice
+                insertInvoice.run(
+                    contract.contract_id,
+                    contract.unit_id,
+                    contract.tenant_id,
+                    invoiceNumber,
+                    billingMonth,
+                    billingYear,
+                    contract.monthly_rent,
+                    dueDateStr
+                );
+
+                invoicesGenerated++;
+            }
+        });
+
+        generateBatch();
+
+        logger.info(`[INVOICE_GEN] Generated ${invoicesGenerated} invoices for ${billingMonth}/${billingYear}`);
+        completeCronLog(cronLogId, 'completed', invoicesGenerated);
+
+        return { invoicesGenerated, month: billingMonth, year: billingYear };
+
+    } catch (error) {
+        logger.error(`[INVOICE_GEN] Failed: ${error.message}`, error.stack);
+        failCronLog(cronLogId, error.message);
+        throw error;
+    }
+}
+
+----------------------------------------------------------------------
+3.2 Overdue Status Transition Function
+----------------------------------------------------------------------
+
+/**
+ * updateOverdueInvoices
+ * Runs daily at 00:00 (same cron tick). Scans all unpaid/partial invoices
+ * whose due_date has passed and transitions their status to 'Overdue'.
+ * This is a separate concern from invoice generation.
+ */
+function updateOverdueInvoices() {
+    const cronLogId = startCronLog('update_overdue');
+
+    try {
+        const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+        const result = db.prepare(`
+            UPDATE invoices
+            SET status = 'Overdue',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE status IN ('Unpaid', 'Partial')
+              AND due_date < ?
+        `).run(today);
+
+        logger.info(`[OVERDUE] Updated ${result.changes} invoices to Overdue`);
+        completeCronLog(cronLogId, 'completed', result.changes);
+
+    } catch (error) {
+        logger.error(`[OVERDUE] Failed: ${error.message}`, error.stack);
+        failCronLog(cronLogId, error.message);
+    }
+}
+
+----------------------------------------------------------------------
+3.3 Partial Payment Rollover Handler
+----------------------------------------------------------------------
+
+/**
+ * handlePartialRollovers
+ * Optional daily task: for invoices that are 'Partial' and the current date
+ * has entered a new billing month, generate a new invoice for the remaining
+ * balance and mark the old one as 'Paid' (or handle via custom logic).
+ *
+ * In Phase 2, partial invoices remain open with status 'Partial' until
+ * fully paid. No rollover is performed. The landlord sees the remaining
+ * balance on the invoice and can collect it at any time.
+ *
+ * This function is a placeholder for Phase 3+ enhancement.
+ */
+function handlePartialRollovers() {
+    // Placeholder: Phase 2 keeps partial invoices open indefinitely.
+    // Future: If a new month starts and the previous month still has a
+    // partial invoice, the remaining balance could be carried forward
+    // as a new invoice line item. This requires a settings toggle.
+}
+
+----------------------------------------------------------------------
+3.4 Cron Job Registration (app.js or server.js)
+----------------------------------------------------------------------
+
+// File: src/cron/scheduler.js
+const cron = require('node-cron');
+const { generateMonthlyInvoices, updateOverdueInvoices } = require('../jobs/invoiceGenerator');
+const logger = require('../utils/logger');
+
+function registerAllCronJobs() {
+    // Generate invoices daily at 00:00
+    const invoiceJob = cron.schedule('0 0 * * *', () => {
+        logger.info('[CRON] Starting scheduled invoice generation');
+        try {
+            const result = generateMonthlyInvoices();
+            logger.info(`[CRON] Completed: ${result.invoicesGenerated} invoices generated`);
+        } catch (err) {
+            logger.error(`[CRON] Invoice generation job failed: ${err.message}`);
+        }
+    }, {
+        scheduled: true,
+        timezone: 'Asia/Riyadh'
+    });
+
+    // Update overdue statuses daily at 00:05 (slightly after invoice gen)
+    const overdueJob = cron.schedule('5 0 * * *', () => {
+        logger.info('[CRON] Starting overdue status update');
+        try {
+            updateOverdueInvoices();
+            logger.info('[CRON] Overdue update completed');
+        } catch (err) {
+            logger.error(`[CRON] Overdue update job failed: ${err.message}`);
+        }
+    }, {
+        scheduled: true,
+        timezone: 'Asia/Riyadh'
+    });
+
+    logger.info('[CRON] All jobs registered successfully');
+    return { invoiceJob, overdueJob };
+}
+
+module.exports = { registerAllCronJobs };
+
+----------------------------------------------------------------------
+3.5 Cron Log Helpers
+----------------------------------------------------------------------
+
+function startCronLog(jobName = 'generate_invoices') {
+    const info = db.prepare(`
+        INSERT INTO cron_log (job_name, started_at, status)
+        VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), 'running')
+    `).run(jobName);
+    return info.lastInsertRowid;
+}
+
+function completeCronLog(id, status, recordsAffected) {
+    db.prepare(`
+        UPDATE cron_log
+        SET completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            status = ?,
+            records_affected = ?
+        WHERE id = ?
+    `).run(status, recordsAffected || 0, id);
+}
+
+function failCronLog(id, errorMessage) {
+    db.prepare(`
+        UPDATE cron_log
+        SET completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            status = 'failed',
+            error_message = ?
+        WHERE id = ?
+    `).run(errorMessage || 'Unknown error', id);
+}
+
+================================================================================
+4. ERROR HANDLING & VALIDATION STRATEGY
+================================================================================
+
+4.1 Centralized Error Handler Middleware
+-----------------------------------------
+File: src/middleware/errorHandler.js
+
+All Express route handlers are wrapped in try/catch and errors are forwarded
+to a centralized error handler via next(err). The error handler:
+
+- Checks if the error is an instance of known error classes:
+  * ValidationError (422) – field-level validation failures
+  * AuthError (401) – authentication failures
+  * ForbiddenError (403) – authorization failures
+  * NotFoundError (404) – resource not found
+  * ConflictError (409) – duplicate or state conflict
+  * RateLimitError (429) – too many requests
+- For unknown errors, logs the full stack trace and returns 500 with a
+  generic Arabic message. Never exposes stack traces to the client.
+
+4.2 Validation Layer
+----------------------
+- express-validator is used on every write endpoint (POST, PUT, PATCH, DELETE).
+- Validation chains are defined in a separate validators/ directory:
+  src/validators/propertyValidator.js
+  src/validators/tenantValidator.js
+  (one file per resource)
+- Each validator exports an array of validation middleware functions.
+- Custom validators check database existence where needed (e.g., unit must
+  exist and be vacant when creating a tenant).
+
+4.3 Multer Error Handling
+--------------------------
+Multer errors (file too large, wrong type) are caught and mapped to
+Arabic error messages as shown in the API specification above.
+
+================================================================================
+5. SECURITY IMPLEMENTATION DETAILS
+================================================================================
+
+5.1 Authentication Middleware
+------------------------------
+File: src/middleware/auth.js
+
+- Extracts the token from the Authorization header (Bearer scheme).
+- Verifies the JWT using jsonwebtoken.verify(token, process.env.JWT_SECRET).
+- Attaches decoded payload to req.user = { userId, role }.
+- Rejects with 401 if token is missing, invalid, or expired.
+- A separate optionalAuth middleware exists for endpoints that can work
+  both authenticated and unauthenticated (future use).
+
+5.2 Authorization Middleware
+-----------------------------
+File: src/middleware/authorize.js
+
+- For every request that involves a resource (property, unit, tenant, etc.),
+  the route handler must verify ownership by querying the user_id field.
+- A helper function assertOwnership(tableName, recordId, userId) throws
+  404 if the record does not exist or does not belong to the user.
+- This prevents user A from accessing user B's data (critical for future
+  multi-tenant expansion).
+
+5.3 Database Security Configuration
+-------------------------------------
+- The SQLite database file is stored outside the web root (e.g., server/data/
+  or a mounted volume in Docker).
+- The database file's permissions are set to 640 (owner read/write, group
+  read-only) on Linux deployments.
+- WAL and SHM files inherit the same security context.
+
+5.4 File Upload Security
+--------------------------
+- All uploaded files are stored under server/uploads/.
+- The uploads directory has NO public alias in the Express static file
+  configuration. Files are ONLY served through /api/files/* endpoints
+  that authenticate and authorize the request.
+- File names are sanitized: all non-alphanumeric characters except hyphen
+  and underscore are replaced with underscores.
+- The original file extension is preserved but checked against the
+  allowed list.
+- A maximum file age cleanup job (weekly) removes orphaned files that
+  have no associated database record (files uploaded but the DB transaction
+  failed).
+
+5.5 Environment Variables
+---------------------------
+The following environment variables must be set in production:
+  JWT_SECRET              (minimum 256-bit random string)
+  JWT_EXPIRES_IN          (default: '7d')
+  PORT                    (default: 3001)
+  NODE_ENV                ('development', 'production')
+  UPLOAD_DIR              (default: './uploads')
+  DATABASE_PATH           (default: './data/pms_database.db')
+  CORS_ORIGIN             (frontend URL for CORS)
+  CRON_TIMEZONE           (default: 'Asia/Riyadh')
+
+================================================================================
+END OF PHASE 3 – SYSTEM ARCHITECTURE & DATABASE DESIGN
+================================================================================

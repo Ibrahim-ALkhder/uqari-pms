@@ -1,0 +1,18 @@
+{
+  "name": "uqari-pms",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Uqari (عقاري) – Property Management System (Monorepo)",
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "seed": "npm run seed --prefix server",
+    "build": "npm run build --prefix client",
+    "start": "npm start --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "md-to-pdf": "^5.2.5"
+  }
+}

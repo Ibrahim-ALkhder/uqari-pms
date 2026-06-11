@@ -1,0 +1,190 @@
+================================================================================
+  Phase 5 - Frontend Implementation Summary
+  Uqari (عقاري) Property Management System
+================================================================================
+
+Total: 11 frontend files | 1,111 lines | 27.1 KB of frontend code
+
+================================================================================
+  FILE STRUCTURE
+================================================================================
+
+E:\projects\test2\
+├── index.html                 (12 lines, 0.3 KB)   - Vite entry HTML
+│                                                      (lang="ar", dir="rtl")
+├── vite.config.js             (10 lines, 0.2 KB)   - Vite config (port 3000)
+├── src/
+│   ├── index.jsx              (11 lines, 0.2 KB)   - React 19 entry point
+│   ├── index.css              (43 lines, 0.7 KB)   - Global RTL styles
+│   │                                                - Cairo/Inter fonts
+│   │                                                - Dark scrollbar
+│   ├── App.jsx                (50 lines, 1.4 KB)   - Main app with router
+│   ├── App.css                (86 lines, 1.8 KB)   - Sidebar + layout styles
+│   ├── api/
+│   │   └── axiosConfig.js     (30 lines, 0.7 KB)   - Axios instance
+│   └── components/
+│       ├── Dashboard.jsx      (239 lines, 7.5 KB)  - Main dashboard component
+│       ├── Dashboard.css      (423 lines, 9.5 KB)  - Dashboard styles
+│       ├── Login.jsx          (79 lines, 2.5 KB)   - Login page component
+│       └── Login.css          (128 lines, 2.3 KB)  - Login page styles
+
+================================================================================
+  COMPLETE PROJECT FOOTPRINT
+================================================================================
+
+Backend: 27 files | 5,865 lines | 237.5 KB
+Frontend: 11 files | 1,111 lines | 27.1 KB
+_____________________________________________________
+Total:   38 files | 6,976 lines | 264.6 KB
+
+================================================================================
+  AXIOS CONFIG (src/api/axiosConfig.js)
+================================================================================
+
+- Base URL: http://localhost:3001/api
+- Request interceptor: auto-injects JWT from localStorage (key: auth_token)
+- Response interceptor:
+  - Passes through successful responses
+  - On 401: removes token, redirects to /login (with isRedirecting flag
+    to prevent multiple simultaneous redirects)
+
+================================================================================
+  ROUTING & AUTH FLOW (src/App.jsx)
+================================================================================
+
+Architecture:
+  <BrowserRouter>
+    <Route path="/login">       → Login page (no sidebar)
+    <Route path="/*">           → AppLayout (sidebar + content)
+
+AppLayout:
+  - Sidebar with "عقاري" branding + navigation items
+  - Protected Route wrapper for Dashboard:
+    - No token → <Navigate to="/login" replace />
+    - Token exists → renders children (Dashboard)
+
+Login page:
+  - Token exists → <Navigate to="/" replace /> (skip login if already auth'd)
+
+Auth flow:
+  1. User opens http://localhost:3000
+  2. No token → ProtectedRoute redirects to /login
+  3. User enters credentials → POST /api/auth/login
+  4. Token stored in localStorage → navigate to /
+  5. Token present → Dashboard loads → API calls succeed
+
+================================================================================
+  DASHBOARD (src/components/Dashboard.jsx)
+================================================================================
+
+Data sources (3 parallel API calls):
+  GET /api/dashboard/summary    → metrics + recent payments
+  GET /api/invoices?limit=15    → invoice list for table
+  GET /api/payments?limit=30    → payment timestamps for Undo check
+
+Metric Cards (grid of 4):
+  1. إجمالي الدخل الشهري     - totalMonthlyIncome (accent: blue)
+  2. نسبة الإشغال            - occupancyRate + occupied/total units
+                               (accent: green)
+  3. المستأجرون النشطون      - activeTenants count (accent: purple)
+  4. المتأخر على المستأجرين  - overdueAmount + unpaid invoices count
+                               (accent: red)
+
+Recent Financial Movements Table:
+  Columns: الفاتورة | المستأجر | الوحدة | المبلغ | الحالة | تاريخ الاستحقاق | إجراء
+  Status badges with colors:
+    - مدفوعة (Paid)        → green (#34d399)
+    - مدفوعة جزئياً (Partial) → amber (#fbbf24)
+    - متأخرة (Overdue)     → red (#f87171)
+    - غير مدفوعة (Unpaid)  → gray (#94a3b8)
+    - ملغاة (Cancelled)    → muted (#64748b)
+  Undo button (↩):
+    - Only visible for Paid invoices with a payment within the last 24h
+    - Cross-references payment createdAt timestamps against current time
+    - Shows confirmation dialog before action
+
+State handling:
+  - Loading: skeleton shimmer animation for metric cards + table rows
+  - Error: centered error card with retry button
+  - Empty: "لا توجد حركات مالية حتى الآن" in table body
+  - Undo toast: green notification bar that auto-dismisses after 3s
+
+================================================================================
+  LOGIN PAGE (src/components/Login.jsx)
+================================================================================
+
+- Glassmorphism card matching Dashboard aesthetic
+- Fields: البريد الإلكتروني (email) + كلمة المرور (password)
+- Submit button: "تسجيل الدخول" with loading state "جاري تسجيل الدخول…"
+- Error display: red toast with Arabic error message
+- Hint text: "للتجربة: ahmed@example.com / secret123"
+- On success: stores token, navigates to /dashboard
+
+================================================================================
+  DESIGN SYSTEM
+================================================================================
+
+Color Palette:
+  Navy:         #0a1628, #0f1d35, #152244
+  Slate:        #1e2d4a, #2a3a5c, #3d5075
+  Accent blue:  #4f8cff, #60a5fa
+  Success:      #10b981, #34d399
+  Warning:      #f59e0b, #fbbf24
+  Danger:       #ef4444, #f87171
+  Text:         #f1f5f9, #e2e8f0, #94a3b8, #64748b
+
+Glassmorphism:
+  background: rgba(255, 255, 255, 0.02–0.05)
+  border: rgba(255, 255, 255, 0.06–0.08)
+  backdrop-filter: blur(12–20px)
+
+Typography:
+  Font: Cairo (Arabic) + Inter (numbers)
+  Weights: 300, 400, 500, 600, 700
+
+Responsive:
+  - 4-col metrics grid → 2-col at 1024px → 1-col at 640px
+  - Sidebar hidden below 768px
+  - Table horizontal scroll on mobile
+
+================================================================================
+  VITE CONFIG (vite.config.js)
+================================================================================
+
+  server:
+    port: 3000
+    open: true
+  plugins: @vitejs/plugin-react
+
+================================================================================
+  DEPENDENCIES ADDED (devDependencies in package.json)
+================================================================================
+
+  @vitejs/plugin-react  ^4.4.1
+  axios                 ^1.7.9
+  react                 ^19.1.0
+  react-dom             ^19.1.0
+  react-router-dom      ^7.5.0
+  vite                  ^6.3.1
+
+================================================================================
+  SCRIPTS
+================================================================================
+
+  npm run dev            → node server.js (backend)
+  npm run dev:frontend   → vite (frontend on port 3000)
+  npm run seed           → node seed.js
+  npm run build          → vite build (production build to dist/)
+
+================================================================================
+  VERIFIED RESULTS
+================================================================================
+
+  Backend (port 3001):   healthy
+  Frontend (port 3000):  serving
+  Auth flow:             Login → token → Dashboard → API data rendered
+  Dashboard metrics:     67% occupancy, 40,500 SAR income,
+                         10 tenants, 40,500 SAR overdue
+  No redirect loop:      ✓ ProtectedRoute + Login route break the cycle
+
+================================================================================

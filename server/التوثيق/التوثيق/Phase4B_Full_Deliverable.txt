@@ -1,0 +1,2180 @@
+================================================================================
+UQARI PMS BACKEND CODE DELIVERABLE — PHASE 4-B
+Enforced Architecture: Node.js (Express) + better-sqlite3 (WAL Mode)
+================================================================================
+
+--------------------------------------------------------------------------------
+FILE 1: controllers/propertyController.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const { getDatabase } = require('../database');
+
+function listProperties(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+
+        const properties = db.prepare(`
+            SELECT
+                p.id,
+                p.name,
+                p.city,
+                p.notes,
+                COUNT(u.id) AS unitCount,
+                SUM(CASE WHEN u.status = 'Occupied' THEN 1 ELSE 0 END) AS occupiedCount,
+                p.created_at AS createdAt,
+                p.updated_at AS updatedAt
+            FROM properties p
+            LEFT JOIN units u ON u.property_id = p.id
+            WHERE p.user_id = ?
+            GROUP BY p.id
+            ORDER BY p.created_at DESC
+        `).all(userId);
+
+        return res.status(200).json({
+            success: true,
+            data: properties,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function getProperty(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const propertyId = parseInt(req.params.id, 10);
+
+        if (isNaN(propertyId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'معرف العقار غير صالح. يرجى إدخال رقم صحيح.',
+            });
+        }
+
+        const property = db.prepare(`
+            SELECT
+                p.id,
+                p.name,
+                p.city,
+                p.notes,
+                p.created_at AS createdAt,
+                p.updated_at AS updatedAt
+            FROM properties p
+            WHERE p.id = ? AND p.user_id = ?
+        `).get(propertyId, userId);
+
+        if (!property) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على العقار المطلوب.',
+            });
+        }
+
+        const units = db.prepare(`
+            SELECT
+                u.id,
+                u.unit_number AS unitNumber,
+                u.type,
+                u.floor,
+                u.monthly_rent AS monthlyRent,
+                u.status,
+                t.full_name AS tenantName,
+                u.created_at AS createdAt,
+                u.updated_at AS updatedAt
+            FROM units u
+            LEFT JOIN tenants t ON t.id = (
+                SELECT ct.tenant_id FROM contracts ct
+                WHERE ct.unit_id = u.id AND ct.status = 'Active'
+                LIMIT 1
+            )
+            WHERE u.property_id = ?
+            ORDER BY u.unit_number ASC
+        `).all(propertyId);
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...property,
+                units,
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function createProperty(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { name, city, unitCount, notes } = req.body;
+
+        const errors = [];
+
+        if (!name || typeof name !== 'string' || name.trim().length < 2) {
+            errors.push({ field: 'name', message: 'اسم العقار مطلوب ويجب أن يكون حرفين على الأقل.' });
+        }
+        if (name && name.trim().length > 100) {
+            errors.push({ field: 'name', message: 'اسم العقار طويل جداً. الحد الأقصى 100 حرف.' });
+        }
+
+        if (!city || typeof city !== 'string' || city.trim().length < 2) {
+            errors.push({ field: 'city', message: 'المدينة مطلوبة ويجب أن تكون حرفين على الأقل.' });
+        }
+        if (city && city.trim().length > 100) {
+            errors.push({ field: 'city', message: 'اسم المدينة طويل جداً. الحد الأقصى 100 حرف.' });
+        }
+
+        const parsedUnitCount = parseInt(unitCount, 10);
+        if (!unitCount || isNaN(parsedUnitCount) || parsedUnitCount < 1 || parsedUnitCount > 100) {
+            errors.push({ field: 'unitCount', message: 'عدد الوحدات يجب أن يكون بين 1 و 100.' });
+        }
+
+        if (notes && typeof notes === 'string' && notes.length > 500) {
+            errors.push({ field: 'notes', message: 'الملاحظات طويلة جداً. الحد الأقصى 500 حرف.' });
+        }
+
+        if (errors.length > 0) {
+            return res.status(422).json({
+                success: false,
+                message: 'يرجى تصحيح الأخطاء التالية:',
+                errors,
+            });
+        }
+
+        const existing = db.prepare('SELECT id FROM properties WHERE user_id = ? AND name = ?').get(userId, name.trim());
+        if (existing) {
+            return res.status(409).json({
+                success: false,
+                message: 'يوجد عقار بنفس الاسم بالفعل. يرجى اختيار اسم آخر.',
+                errors: [{ field: 'name', message: 'اسم العقار مكرر.' }],
+            });
+        }
+
+        const insertProperty = db.prepare(`
+            INSERT INTO properties (user_id, name, city, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `);
+
+        const insertUnit = db.prepare(`
+            INSERT INTO units (property_id, unit_number, type, monthly_rent, status, created_at, updated_at)
+            VALUES (?, ?, 'Apartment', 0, 'Vacant',
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `);
+
+        const transaction = db.transaction(() => {
+            const propertyResult = insertProperty.run(userId, name.trim(), city.trim(), notes || null);
+            const propertyId = propertyResult.lastInsertRowid;
+
+            const units = [];
+            for (let i = 1; i <= parsedUnitCount; i++) {
+                const unitResult = insertUnit.run(propertyId, `وحدة ${i}`);
+                units.push({ id: unitResult.lastInsertRowid, unitNumber: `وحدة ${i}` });
+            }
+
+            return { propertyId, units };
+        });
+
+        const { propertyId, units } = transaction();
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'ADD_PROPERTY', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, propertyId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        return res.status(201).json({
+            success: true,
+            message: 'تم إضافة العقار بنجاح مع جميع وحداته.',
+            data: {
+                id: propertyId,
+                name: name.trim(),
+                city: city.trim(),
+                unitCount: parsedUnitCount,
+                units,
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function updateProperty(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const propertyId = parseInt(req.params.id, 10);
+
+        if (isNaN(propertyId)) {
+            return res.status(400).json({ success: false, message: 'معرف العقار غير صالح.' });
+        }
+
+        const property = db.prepare('SELECT id FROM properties WHERE id = ? AND user_id = ?').get(propertyId, userId);
+        if (!property) {
+            return res.status(404).json({ success: false, message: 'عذراً، لم يتم العثور على العقار المطلوب.' });
+        }
+
+        const { name, city, notes } = req.body;
+        const errors = [];
+
+        if (name !== undefined && (typeof name !== 'string' || name.trim().length < 2)) {
+            errors.push({ field: 'name', message: 'اسم العقار يجب أن يكون حرفين على الأقل.' });
+        }
+        if (name && name.trim().length > 100) {
+            errors.push({ field: 'name', message: 'اسم العقار طويل جداً.' });
+        }
+        if (city !== undefined && (typeof city !== 'string' || city.trim().length < 2)) {
+            errors.push({ field: 'city', message: 'المدينة يجب أن تكون حرفين على الأقل.' });
+        }
+        if (notes !== undefined && typeof notes === 'string' && notes.length > 500) {
+            errors.push({ field: 'notes', message: 'الملاحظات طويلة جداً.' });
+        }
+        if (errors.length > 0) {
+            return res.status(422).json({ success: false, message: 'يرجى تصحيح الأخطاء التالية:', errors });
+        }
+
+        const updateFields = [];
+        const updateValues = [];
+
+        if (name !== undefined) { updateFields.push('name = ?'); updateValues.push(name.trim()); }
+        if (city !== undefined) { updateFields.push('city = ?'); updateValues.push(city.trim()); }
+        if (notes !== undefined) { updateFields.push('notes = ?'); updateValues.push(notes || null); }
+
+        if (updateFields.length === 0) {
+            return res.status(400).json({ success: false, message: 'لم يتم إرسال أي بيانات للتحديث.' });
+        }
+
+        updateValues.push(propertyId, userId);
+        db.prepare(`
+            UPDATE properties SET ${updateFields.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND user_id = ?
+        `).run(...updateValues);
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'UPDATE_PROPERTY', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, propertyId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        const updated = db.prepare('SELECT id, name, city, notes FROM properties WHERE id = ?').get(propertyId);
+
+        return res.status(200).json({
+            success: true,
+            message: 'تم تحديث بيانات العقار بنجاح.',
+            data: updated,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function deleteProperty(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const propertyId = parseInt(req.params.id, 10);
+
+        if (isNaN(propertyId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'معرف العقار غير صالح.',
+            });
+        }
+
+        const { confirm } = req.body;
+        const allowedWords = ['محو', 'حذف'];
+        if (!confirm || typeof confirm !== 'string' || !allowedWords.includes(confirm.trim())) {
+            return res.status(400).json({
+                success: false,
+                message: 'يرجى كتابة كلمة "محو" أو "حذف" في حقل التأكيد لحذف العقار. هذه العملية لا يمكن التراجع عنها.',
+                errors: [{ field: 'confirm', message: 'يجب كتابة "محو" أو "حذف" للتأكيد.' }],
+            });
+        }
+
+        const property = db.prepare('SELECT id, name FROM properties WHERE id = ? AND user_id = ?').get(propertyId, userId);
+        if (!property) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على العقار المطلوب.',
+            });
+        }
+
+        const activeContract = db.prepare(`
+            SELECT c.id
+            FROM contracts c
+            JOIN units u ON c.unit_id = u.id
+            WHERE u.property_id = ? AND c.status = 'Active'
+            LIMIT 1
+        `).get(propertyId);
+
+        if (activeContract) {
+            return res.status(409).json({
+                success: false,
+                message: 'عذراً، لا يمكن حذف العقار لأنه يحتوي على وحدات مؤجرة بعقود نشطة. يرجى إنهاء العقود أولاً ثم المحاولة مرة أخرى.',
+            });
+        }
+
+        const unpaidInvoice = db.prepare(`
+            SELECT i.id
+            FROM invoices i
+            JOIN units u ON i.unit_id = u.id
+            WHERE u.property_id = ? AND i.status IN ('Unpaid', 'Overdue', 'Partial')
+            LIMIT 1
+        `).get(propertyId);
+
+        if (unpaidInvoice) {
+            return res.status(409).json({
+                success: false,
+                message: 'عذراً، لا يمكن حذف العقار لوجود فواتير غير مدفوعة مرتبطة به. يرجى تحصيل الفواتير أولاً.',
+            });
+        }
+
+        db.prepare('DELETE FROM properties WHERE id = ? AND user_id = ?').run(propertyId, userId);
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, details, created_at)
+            VALUES (?, 'DELETE_PROPERTY', ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, propertyId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown', JSON.stringify({ name: property.name }));
+
+        return res.status(200).json({
+            success: true,
+            message: 'تم حذف العقار وجميع البيانات المرتبطة به نهائياً.',
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+module.exports = {
+    listProperties,
+    getProperty,
+    createProperty,
+    updateProperty,
+    deleteProperty,
+};
+
+--------------------------------------------------------------------------------
+FILE 2: routes/propertyRoutes.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const express = require('express');
+const router = express.Router();
+
+const { authenticate } = require('../middleware/authMiddleware');
+const {
+    listProperties,
+    getProperty,
+    createProperty,
+    updateProperty,
+    deleteProperty,
+} = require('../controllers/propertyController');
+
+router.get('/', authenticate, listProperties);
+router.get('/:id', authenticate, getProperty);
+router.post('/', authenticate, createProperty);
+router.put('/:id', authenticate, updateProperty);
+router.delete('/:id', authenticate, deleteProperty);
+
+module.exports = router;
+
+--------------------------------------------------------------------------------
+FILE 3: controllers/unitController.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const { getDatabase } = require('../database');
+
+function listUnits(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { property_id, status } = req.query;
+
+        let query = `
+            SELECT
+                u.id,
+                u.property_id AS propertyId,
+                p.name AS propertyName,
+                u.unit_number AS unitNumber,
+                u.type,
+                u.floor,
+                u.monthly_rent AS monthlyRent,
+                u.status,
+                t.id AS tenantId,
+                t.full_name AS tenantName,
+                t.phone AS tenantPhone,
+                u.created_at AS createdAt,
+                u.updated_at AS updatedAt
+            FROM units u
+            JOIN properties p ON u.property_id = p.id
+            LEFT JOIN tenants t ON t.id = (
+                SELECT ct.tenant_id FROM contracts ct
+                WHERE ct.unit_id = u.id AND ct.status = 'Active'
+                LIMIT 1
+            )
+            WHERE p.user_id = ?
+        `;
+
+        const params = [userId];
+
+        if (property_id) {
+            const pid = parseInt(property_id, 10);
+            if (!isNaN(pid)) {
+                query += ' AND u.property_id = ?';
+                params.push(pid);
+            }
+        }
+
+        if (status) {
+            const validStatuses = ['Vacant', 'Occupied', 'UnderMaintenance'];
+            if (validStatuses.includes(status)) {
+                query += ' AND u.status = ?';
+                params.push(status);
+            }
+        }
+
+        query += ' ORDER BY p.name ASC, u.unit_number ASC';
+
+        const units = db.prepare(query).all(...params);
+
+        return res.status(200).json({
+            success: true,
+            data: units,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function getUnit(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const unitId = parseInt(req.params.id, 10);
+
+        if (isNaN(unitId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'معرف الوحدة غير صالح.',
+            });
+        }
+
+        const unit = db.prepare(`
+            SELECT
+                u.id,
+                u.property_id AS propertyId,
+                p.name AS propertyName,
+                u.unit_number AS unitNumber,
+                u.type,
+                u.floor,
+                u.monthly_rent AS monthlyRent,
+                u.status,
+                u.created_at AS createdAt,
+                u.updated_at AS updatedAt
+            FROM units u
+            JOIN properties p ON u.property_id = p.id
+            WHERE u.id = ? AND p.user_id = ?
+        `).get(unitId, userId);
+
+        if (!unit) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على الوحدة المطلوبة.',
+            });
+        }
+
+        const activeContract = db.prepare(`
+            SELECT
+                c.id,
+                c.tenant_id AS tenantId,
+                t.full_name AS tenantName,
+                t.phone AS tenantPhone,
+                c.start_date AS startDate,
+                c.end_date AS endDate,
+                c.monthly_rent AS monthlyRent,
+                c.status AS contractStatus
+            FROM contracts c
+            JOIN tenants t ON c.tenant_id = t.id
+            WHERE c.unit_id = ? AND c.status = 'Active'
+            LIMIT 1
+        `).get(unitId);
+
+        const recentInvoices = db.prepare(`
+            SELECT
+                i.id,
+                i.invoice_number AS invoiceNumber,
+                i.billing_month AS billingMonth,
+                i.billing_year AS billingYear,
+                i.amount,
+                i.due_date AS dueDate,
+                i.status,
+                COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.invoice_id = i.id), 0) AS paidAmount
+            FROM invoices i
+            WHERE i.unit_id = ?
+            ORDER BY i.billing_year DESC, i.billing_month DESC
+            LIMIT 12
+        `).all(unitId);
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...unit,
+                currentContract: activeContract || null,
+                invoices: recentInvoices,
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function createUnit(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { propertyId, unitNumber, type, floor, monthlyRent, status } = req.body;
+
+        const errors = [];
+
+        const parsedPropertyId = parseInt(propertyId, 10);
+        if (!propertyId || isNaN(parsedPropertyId)) {
+            errors.push({ field: 'propertyId', message: 'معرف العقار مطلوب.' });
+        }
+
+        if (!unitNumber || typeof unitNumber !== 'string' || unitNumber.trim().length < 1) {
+            errors.push({ field: 'unitNumber', message: 'رقم الوحدة مطلوب.' });
+        } else if (unitNumber.trim().length > 50) {
+            errors.push({ field: 'unitNumber', message: 'رقم الوحدة طويل جداً. الحد الأقصى 50 حرفاً.' });
+        }
+
+        const validTypes = ['Apartment', 'Shop', 'Room', 'Villa', 'Studio'];
+        if (type && !validTypes.includes(type)) {
+            errors.push({ field: 'type', message: 'نوع الوحدة غير صالح. الأنواع المتاحة: شقة، محل، غرفة، فيلا، استوديو.' });
+        }
+
+        if (floor !== undefined && floor !== null && floor !== '') {
+            const parsedFloor = parseInt(floor, 10);
+            if (isNaN(parsedFloor) || parsedFloor < 0 || parsedFloor > 200) {
+                errors.push({ field: 'floor', message: 'رقم الطابق يجب أن يكون بين 0 و 200.' });
+            }
+        }
+
+        const parsedRent = monthlyRent !== undefined && monthlyRent !== '' && monthlyRent !== null ? parseFloat(monthlyRent) : 0;
+        if (isNaN(parsedRent) || parsedRent < 0 || parsedRent > 999999999) {
+            errors.push({ field: 'monthlyRent', message: 'الإيجار الشهري يجب أن يكون قيمة صحيحة بين 0 و 999,999,999.' });
+        }
+
+        const validStatuses = ['Vacant', 'Occupied', 'UnderMaintenance'];
+        if (status && !validStatuses.includes(status)) {
+            errors.push({ field: 'status', message: 'الحالة غير صالحة. الحالات المتاحة: شاغرة، مؤجرة، تحت الصيانة.' });
+        }
+
+        if (errors.length > 0) {
+            return res.status(422).json({
+                success: false,
+                message: 'يرجى تصحيح الأخطاء التالية:',
+                errors,
+            });
+        }
+
+        const property = db.prepare('SELECT id FROM properties WHERE id = ? AND user_id = ?').get(parsedPropertyId, userId);
+        if (!property) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على العقار المحدد.',
+            });
+        }
+
+        const duplicate = db.prepare('SELECT id FROM units WHERE property_id = ? AND unit_number = ?').get(parsedPropertyId, unitNumber.trim());
+        if (duplicate) {
+            return res.status(409).json({
+                success: false,
+                message: 'رقم الوحدة موجود مسبقاً في هذا العقار. يرجى اختيار رقم آخر.',
+                errors: [{ field: 'unitNumber', message: 'رقم الوحدة مكرر.' }],
+            });
+        }
+
+        const result = db.prepare(`
+            INSERT INTO units (property_id, unit_number, type, floor, monthly_rent, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(
+            parsedPropertyId,
+            unitNumber.trim(),
+            type || 'Apartment',
+            floor !== undefined && floor !== '' && floor !== null ? parseInt(floor, 10) : null,
+            parsedRent,
+            status || 'Vacant'
+        );
+
+        const unitId = result.lastInsertRowid;
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'ADD_UNIT', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, unitId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        return res.status(201).json({
+            success: true,
+            message: 'تم إضافة الوحدة بنجاح.',
+            data: {
+                id: unitId,
+                propertyId: parsedPropertyId,
+                unitNumber: unitNumber.trim(),
+                type: type || 'Apartment',
+                floor: floor !== undefined && floor !== '' && floor !== null ? parseInt(floor, 10) : null,
+                monthlyRent: parsedRent,
+                status: status || 'Vacant',
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function updateUnit(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const unitId = parseInt(req.params.id, 10);
+
+        if (isNaN(unitId)) {
+            return res.status(400).json({ success: false, message: 'معرف الوحدة غير صالح.' });
+        }
+
+        const unit = db.prepare(`
+            SELECT u.id, u.property_id, u.unit_number
+            FROM units u
+            JOIN properties p ON u.property_id = p.id
+            WHERE u.id = ? AND p.user_id = ?
+        `).get(unitId, userId);
+
+        if (!unit) {
+            return res.status(404).json({ success: false, message: 'عذراً، لم يتم العثور على الوحدة المطلوبة.' });
+        }
+
+        const { unitNumber, type, floor, monthlyRent, status } = req.body;
+        const updateFields = [];
+        const updateValues = [];
+        const errors = [];
+
+        if (unitNumber !== undefined) {
+            if (typeof unitNumber !== 'string' || unitNumber.trim().length < 1) {
+                errors.push({ field: 'unitNumber', message: 'رقم الوحدة يجب أن يكون حرفاً واحداً على الأقل.' });
+            } else if (unitNumber.trim().length > 50) {
+                errors.push({ field: 'unitNumber', message: 'رقم الوحدة طويل جداً.' });
+            } else {
+                const dup = db.prepare('SELECT id FROM units WHERE property_id = ? AND unit_number = ? AND id != ?').get(unit.property_id, unitNumber.trim(), unitId);
+                if (dup) {
+                    errors.push({ field: 'unitNumber', message: 'رقم الوحدة موجود مسبقاً في هذا العقار.' });
+                } else {
+                    updateFields.push('unit_number = ?');
+                    updateValues.push(unitNumber.trim());
+                }
+            }
+        }
+
+        const validTypes = ['Apartment', 'Shop', 'Room', 'Villa', 'Studio'];
+        if (type !== undefined) {
+            if (!validTypes.includes(type)) {
+                errors.push({ field: 'type', message: 'نوع الوحدة غير صالح.' });
+            } else {
+                updateFields.push('type = ?');
+                updateValues.push(type);
+            }
+        }
+
+        if (floor !== undefined) {
+            if (floor !== null && floor !== '' && (isNaN(parseInt(floor, 10)) || parseInt(floor, 10) < 0 || parseInt(floor, 10) > 200)) {
+                errors.push({ field: 'floor', message: 'رقم الطابق يجب أن يكون بين 0 و 200.' });
+            } else {
+                updateFields.push('floor = ?');
+                updateValues.push(floor !== null && floor !== '' ? parseInt(floor, 10) : null);
+            }
+        }
+
+        if (monthlyRent !== undefined) {
+            const parsed = parseFloat(monthlyRent);
+            if (isNaN(parsed) || parsed < 0 || parsed > 999999999) {
+                errors.push({ field: 'monthlyRent', message: 'الإيجار الشهري غير صالح.' });
+            } else {
+                updateFields.push('monthly_rent = ?');
+                updateValues.push(parsed);
+            }
+        }
+
+        const validStatuses = ['Vacant', 'Occupied', 'UnderMaintenance'];
+        if (status !== undefined) {
+            if (!validStatuses.includes(status)) {
+                errors.push({ field: 'status', message: 'الحالة غير صالحة.' });
+            } else {
+                updateFields.push('status = ?');
+                updateValues.push(status);
+            }
+        }
+
+        if (errors.length > 0) {
+            return res.status(422).json({ success: false, message: 'يرجى تصحيح الأخطاء التالية:', errors });
+        }
+
+        if (updateFields.length === 0) {
+            return res.status(400).json({ success: false, message: 'لم يتم إرسال أي بيانات للتحديث.' });
+        }
+
+        updateValues.push(unitId);
+        db.prepare(`
+            UPDATE units SET ${updateFields.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(...updateValues);
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'UPDATE_UNIT', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, unitId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        const updated = db.prepare(`
+            SELECT id, property_id AS propertyId, unit_number AS unitNumber, type, floor, monthly_rent AS monthlyRent, status
+            FROM units WHERE id = ?
+        `).get(unitId);
+
+        return res.status(200).json({
+            success: true,
+            message: 'تم تحديث بيانات الوحدة بنجاح.',
+            data: updated,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function deleteUnit(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const unitId = parseInt(req.params.id, 10);
+
+        if (isNaN(unitId)) {
+            return res.status(400).json({ success: false, message: 'معرف الوحدة غير صالح.' });
+        }
+
+        const unit = db.prepare(`
+            SELECT u.id, u.unit_number
+            FROM units u
+            JOIN properties p ON u.property_id = p.id
+            WHERE u.id = ? AND p.user_id = ?
+        `).get(unitId, userId);
+
+        if (!unit) {
+            return res.status(404).json({ success: false, message: 'عذراً، لم يتم العثور على الوحدة المطلوبة.' });
+        }
+
+        const activeContract = db.prepare('SELECT id FROM contracts WHERE unit_id = ? AND status = ?').get(unitId, 'Active');
+        if (activeContract) {
+            return res.status(409).json({
+                success: false,
+                message: 'لا يمكن حذف الوحدة لأنها مؤجرة بعقد نشط. يرجى إنهاء العقد أولاً.',
+            });
+        }
+
+        db.prepare('DELETE FROM units WHERE id = ?').run(unitId);
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'DELETE_UNIT', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, unitId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        return res.status(200).json({
+            success: true,
+            message: 'تم حذف الوحدة بنجاح.',
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function updateUnitStatus(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const unitId = parseInt(req.params.id, 10);
+
+        if (isNaN(unitId)) {
+            return res.status(400).json({ success: false, message: 'معرف الوحدة غير صالح.' });
+        }
+
+        const { status } = req.body;
+        const validStatuses = ['Vacant', 'Occupied', 'UnderMaintenance'];
+
+        if (!status || !validStatuses.includes(status)) {
+            return res.status(422).json({
+                success: false,
+                message: 'الحالة غير صالحة. الحالات المتاحة: شاغرة، مؤجرة، تحت الصيانة.',
+                errors: [{ field: 'status', message: 'يرجى اختيار حالة صحيحة.' }],
+            });
+        }
+
+        const unit = db.prepare(`
+            SELECT u.id, u.status
+            FROM units u
+            JOIN properties p ON u.property_id = p.id
+            WHERE u.id = ? AND p.user_id = ?
+        `).get(unitId, userId);
+
+        if (!unit) {
+            return res.status(404).json({ success: false, message: 'عذراً، لم يتم العثور على الوحدة.' });
+        }
+
+        if (status === 'Occupied') {
+            const activeContract = db.prepare('SELECT id FROM contracts WHERE unit_id = ? AND status = ?').get(unitId, 'Active');
+            if (!activeContract) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'لا يمكن تغيير الحالة إلى مؤجرة دون وجود عقد نشط. يرجى إنشاء عقد أولاً.',
+                });
+            }
+        }
+
+        if (status === 'Vacant') {
+            const activeContract = db.prepare('SELECT id FROM contracts WHERE unit_id = ? AND status = ?').get(unitId, 'Active');
+            if (activeContract) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'لا يمكن تغيير الحالة إلى شاغرة لأن الوحدة مؤجرة بعقد نشط. يرجى إنهاء العقد أولاً.',
+                });
+            }
+        }
+
+        db.prepare(`
+            UPDATE units SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(status, unitId);
+
+        const statusLabels = { Vacant: 'شاغرة', Occupied: 'مؤجرة', UnderMaintenance: 'تحت الصيانة' };
+
+        return res.status(200).json({
+            success: true,
+            message: `تم تغيير حالة الوحدة إلى ${statusLabels[status]} بنجاح.`,
+            data: { id: unitId, status },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+module.exports = {
+    listUnits,
+    getUnit,
+    createUnit,
+    updateUnit,
+    deleteUnit,
+    updateUnitStatus,
+};
+
+--------------------------------------------------------------------------------
+FILE 4: routes/unitRoutes.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const express = require('express');
+const router = express.Router();
+
+const { authenticate } = require('../middleware/authMiddleware');
+const {
+    listUnits,
+    getUnit,
+    createUnit,
+    updateUnit,
+    deleteUnit,
+    updateUnitStatus,
+} = require('../controllers/unitController');
+
+router.get('/', authenticate, listUnits);
+router.get('/:id', authenticate, getUnit);
+router.post('/', authenticate, createUnit);
+router.put('/:id', authenticate, updateUnit);
+router.patch('/:id/status', authenticate, updateUnitStatus);
+router.delete('/:id', authenticate, deleteUnit);
+
+module.exports = router;
+
+--------------------------------------------------------------------------------
+FILE 5: controllers/tenantController.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const { getDatabase } = require('../database');
+
+function listTenants(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { status, search } = req.query;
+
+        let query = `
+            SELECT
+                t.id,
+                t.full_name AS fullName,
+                t.phone,
+                t.secondary_phone AS secondaryPhone,
+                t.national_id AS nationalId,
+                t.notes,
+                t.is_former AS isFormer,
+                u.unit_number AS unitNumber,
+                p.name AS propertyName,
+                c.id AS contractId,
+                c.status AS contractStatus,
+                t.created_at AS createdAt,
+                t.updated_at AS updatedAt
+            FROM tenants t
+            LEFT JOIN contracts c ON c.tenant_id = t.id AND c.status = 'Active'
+            LEFT JOIN units u ON c.unit_id = u.id
+            LEFT JOIN properties p ON u.property_id = p.id
+            WHERE t.user_id = ?
+        `;
+
+        const params = [userId];
+
+        if (status === 'former') {
+            query += ' AND t.is_former = 1';
+        } else {
+            query += ' AND t.is_former = 0';
+        }
+
+        if (search && typeof search === 'string' && search.trim().length >= 2) {
+            query += ' AND t.full_name LIKE ?';
+            params.push(`%${search.trim()}%`);
+        }
+
+        query += ' ORDER BY t.full_name ASC';
+
+        const tenants = db.prepare(query).all(...params);
+
+        return res.status(200).json({
+            success: true,
+            data: tenants,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function getTenant(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const tenantId = parseInt(req.params.id, 10);
+
+        if (isNaN(tenantId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'معرف المستأجر غير صالح.',
+            });
+        }
+
+        const tenant = db.prepare(`
+            SELECT
+                t.id,
+                t.full_name AS fullName,
+                t.phone,
+                t.secondary_phone AS secondaryPhone,
+                t.national_id AS nationalId,
+                t.notes,
+                t.is_former AS isFormer,
+                t.created_at AS createdAt,
+                t.updated_at AS updatedAt
+            FROM tenants t
+            WHERE t.id = ? AND t.user_id = ?
+        `).get(tenantId, userId);
+
+        if (!tenant) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على المستأجر.',
+            });
+        }
+
+        const contracts = db.prepare(`
+            SELECT
+                c.id,
+                c.unit_id AS unitId,
+                u.unit_number AS unitNumber,
+                p.name AS propertyName,
+                c.start_date AS startDate,
+                c.end_date AS endDate,
+                c.monthly_rent AS monthlyRent,
+                c.status
+            FROM contracts c
+            JOIN units u ON c.unit_id = u.id
+            JOIN properties p ON u.property_id = p.id
+            WHERE c.tenant_id = ?
+            ORDER BY c.created_at DESC
+        `).all(tenantId);
+
+        const payments = db.prepare(`
+            SELECT
+                py.id,
+                py.amount,
+                py.payment_date AS paymentDate,
+                py.payment_method AS paymentMethod,
+                py.notes,
+                i.invoice_number AS invoiceNumber,
+                i.billing_month AS billingMonth,
+                i.billing_year AS billingYear
+            FROM payments py
+            JOIN invoices i ON py.invoice_id = i.id
+            WHERE i.tenant_id = ?
+            ORDER BY py.created_at DESC
+            LIMIT 20
+        `).all(tenantId);
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...tenant,
+                contracts,
+                recentPayments: payments,
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function createTenant(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { fullName, phone, secondaryPhone, nationalId, notes } = req.body;
+
+        const errors = [];
+
+        if (!fullName || typeof fullName !== 'string' || fullName.trim().length < 2) {
+            errors.push({ field: 'fullName', message: 'الاسم الكامل مطلوب ويجب أن يكون حرفين على الأقل.' });
+        } else if (fullName.trim().length > 100) {
+            errors.push({ field: 'fullName', message: 'الاسم طويل جداً. الحد الأقصى 100 حرف.' });
+        }
+
+        if (!phone || typeof phone !== 'string') {
+            errors.push({ field: 'phone', message: 'رقم الجوال مطلوب.' });
+        } else {
+            const cleaned = phone.trim().replace(/[\s\-\(\)]/g, '');
+            if (cleaned.length < 7 || cleaned.length > 20) {
+                errors.push({ field: 'phone', message: 'رقم الجوال غير صالح. يجب أن يكون بين 7 و 20 رقم.' });
+            }
+        }
+
+        if (secondaryPhone && typeof secondaryPhone === 'string') {
+            const cleaned = secondaryPhone.trim().replace(/[\s\-\(\)]/g, '');
+            if (cleaned.length > 0 && (cleaned.length < 7 || cleaned.length > 20)) {
+                errors.push({ field: 'secondaryPhone', message: 'رقم الجوال الثاني غير صالح.' });
+            }
+        }
+
+        if (nationalId && typeof nationalId === 'string' && nationalId.trim().length > 0) {
+            if (nationalId.trim().length < 5 || nationalId.trim().length > 20) {
+                errors.push({ field: 'nationalId', message: 'رقم الهوية يجب أن يكون بين 5 و 20 حرفاً.' });
+            }
+        }
+
+        if (notes && typeof notes === 'string' && notes.length > 500) {
+            errors.push({ field: 'notes', message: 'الملاحظات طويلة جداً. الحد الأقصى 500 حرف.' });
+        }
+
+        if (errors.length > 0) {
+            return res.status(422).json({
+                success: false,
+                message: 'يرجى تصحيح الأخطاء التالية:',
+                errors,
+            });
+        }
+
+        const existingPhone = db.prepare('SELECT id, full_name FROM tenants WHERE user_id = ? AND phone = ? AND is_former = 0').get(userId, phone.trim());
+        if (existingPhone) {
+            return res.status(409).json({
+                success: false,
+                message: `يوجد مستأجر نشط بنفس رقم الجوال: ${existingPhone.full_name}. يرجى التحقق من البيانات.`,
+                errors: [{ field: 'phone', message: 'رقم الجوال موجود مسبقاً.' }],
+            });
+        }
+
+        const result = db.prepare(`
+            INSERT INTO tenants (user_id, full_name, phone, secondary_phone, national_id, notes, is_former, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(
+            userId,
+            fullName.trim(),
+            phone.trim(),
+            secondaryPhone && secondaryPhone.trim() ? secondaryPhone.trim() : null,
+            nationalId && nationalId.trim() ? nationalId.trim() : null,
+            notes && notes.trim() ? notes.trim() : null
+        );
+
+        const tenantId = result.lastInsertRowid;
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'ADD_TENANT', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, tenantId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        return res.status(201).json({
+            success: true,
+            message: 'تم تسجيل المستأجر بنجاح. يمكنك الآن إنشاء عقد له.',
+            data: {
+                id: tenantId,
+                fullName: fullName.trim(),
+                phone: phone.trim(),
+                secondaryPhone: secondaryPhone && secondaryPhone.trim() ? secondaryPhone.trim() : null,
+                nationalId: nationalId && nationalId.trim() ? nationalId.trim() : null,
+                notes: notes && notes.trim() ? notes.trim() : null,
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function updateTenant(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const tenantId = parseInt(req.params.id, 10);
+
+        if (isNaN(tenantId)) {
+            return res.status(400).json({ success: false, message: 'معرف المستأجر غير صالح.' });
+        }
+
+        const tenant = db.prepare('SELECT id FROM tenants WHERE id = ? AND user_id = ?').get(tenantId, userId);
+        if (!tenant) {
+            return res.status(404).json({ success: false, message: 'عذراً، لم يتم العثور على المستأجر.' });
+        }
+
+        const { fullName, phone, secondaryPhone, nationalId, notes } = req.body;
+        const updateFields = [];
+        const updateValues = [];
+        const errors = [];
+
+        if (fullName !== undefined) {
+            if (typeof fullName !== 'string' || fullName.trim().length < 2) {
+                errors.push({ field: 'fullName', message: 'الاسم يجب أن يكون حرفين على الأقل.' });
+            } else {
+                updateFields.push('full_name = ?');
+                updateValues.push(fullName.trim());
+            }
+        }
+
+        if (phone !== undefined) {
+            const cleaned = phone.trim().replace(/[\s\-\(\)]/g, '');
+            if (cleaned.length < 7 || cleaned.length > 20) {
+                errors.push({ field: 'phone', message: 'رقم الجوال غير صالح.' });
+            } else {
+                updateFields.push('phone = ?');
+                updateValues.push(phone.trim());
+            }
+        }
+
+        if (secondaryPhone !== undefined) {
+            if (secondaryPhone.trim().length > 0 && (secondaryPhone.trim().replace(/[\s\-\(\)]/g, '').length < 7 || secondaryPhone.trim().replace(/[\s\-\(\)]/g, '').length > 20)) {
+                errors.push({ field: 'secondaryPhone', message: 'رقم الجوال الثاني غير صالح.' });
+            } else {
+                updateFields.push('secondary_phone = ?');
+                updateValues.push(secondaryPhone.trim() || null);
+            }
+        }
+
+        if (nationalId !== undefined) {
+            if (nationalId.trim().length > 0 && (nationalId.trim().length < 5 || nationalId.trim().length > 20)) {
+                errors.push({ field: 'nationalId', message: 'رقم الهوية غير صالح.' });
+            } else {
+                updateFields.push('national_id = ?');
+                updateValues.push(nationalId.trim() || null);
+            }
+        }
+
+        if (notes !== undefined) {
+            if (notes.length > 500) {
+                errors.push({ field: 'notes', message: 'الملاحظات طويلة جداً.' });
+            } else {
+                updateFields.push('notes = ?');
+                updateValues.push(notes.trim() || null);
+            }
+        }
+
+        if (errors.length > 0) {
+            return res.status(422).json({ success: false, message: 'يرجى تصحيح الأخطاء التالية:', errors });
+        }
+
+        if (updateFields.length === 0) {
+            return res.status(400).json({ success: false, message: 'لم يتم إرسال أي بيانات للتحديث.' });
+        }
+
+        updateValues.push(tenantId, userId);
+        db.prepare(`
+            UPDATE tenants SET ${updateFields.join(', ')}, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND user_id = ?
+        `).run(...updateValues);
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, created_at)
+            VALUES (?, 'UPDATE_TENANT', ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, tenantId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown');
+
+        const updated = db.prepare(`
+            SELECT id, full_name AS fullName, phone, secondary_phone AS secondaryPhone,
+                   national_id AS nationalId, notes, is_former AS isFormer
+            FROM tenants WHERE id = ?
+        `).get(tenantId);
+
+        return res.status(200).json({
+            success: true,
+            message: 'تم تحديث بيانات المستأجر بنجاح.',
+            data: updated,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function deleteTenant(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const tenantId = parseInt(req.params.id, 10);
+
+        if (isNaN(tenantId)) {
+            return res.status(400).json({ success: false, message: 'معرف المستأجر غير صالح.' });
+        }
+
+        const tenant = db.prepare('SELECT id, full_name FROM tenants WHERE id = ? AND user_id = ?').get(tenantId, userId);
+        if (!tenant) {
+            return res.status(404).json({ success: false, message: 'عذراً، لم يتم العثور على المستأجر.' });
+        }
+
+        const activeContract = db.prepare('SELECT id FROM contracts WHERE tenant_id = ? AND status = ?').get(tenantId, 'Active');
+        if (activeContract) {
+            return res.status(409).json({
+                success: false,
+                message: 'لا يمكن حذف المستأجر لأنه لديه عقد نشط. يرجى إنهاء العقد أولاً.',
+            });
+        }
+
+        db.prepare(`
+            UPDATE tenants SET is_former = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND user_id = ?
+        `).run(tenantId, userId);
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, details, created_at)
+            VALUES (?, 'DELETE_TENANT', ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, tenantId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown', JSON.stringify({ name: tenant.full_name }));
+
+        return res.status(200).json({
+            success: true,
+            message: 'تم نقل المستأجر إلى قائمة المستأجرين السابقين.',
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+module.exports = {
+    listTenants,
+    getTenant,
+    createTenant,
+    updateTenant,
+    deleteTenant,
+};
+
+--------------------------------------------------------------------------------
+FILE 6: routes/tenantRoutes.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const express = require('express');
+const router = express.Router();
+
+const { authenticate } = require('../middleware/authMiddleware');
+const {
+    listTenants,
+    getTenant,
+    createTenant,
+    updateTenant,
+    deleteTenant,
+} = require('../controllers/tenantController');
+
+router.get('/', authenticate, listTenants);
+router.get('/:id', authenticate, getTenant);
+router.post('/', authenticate, createTenant);
+router.put('/:id', authenticate, updateTenant);
+router.delete('/:id', authenticate, deleteTenant);
+
+module.exports = router;
+
+--------------------------------------------------------------------------------
+FILE 7: controllers/contractController.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const { getDatabase } = require('../database');
+
+function createContract(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { tenantId, unitId, startDate, monthlyRent, endDate } = req.body;
+
+        const errors = [];
+
+        const parsedTenantId = parseInt(tenantId, 10);
+        if (!tenantId || isNaN(parsedTenantId)) {
+            errors.push({ field: 'tenantId', message: 'معرف المستأجر مطلوب.' });
+        }
+
+        const parsedUnitId = parseInt(unitId, 10);
+        if (!unitId || isNaN(parsedUnitId)) {
+            errors.push({ field: 'unitId', message: 'معرف الوحدة مطلوب.' });
+        }
+
+        if (!startDate || typeof startDate !== 'string') {
+            errors.push({ field: 'startDate', message: 'تاريخ بداية العقد مطلوب.' });
+        } else {
+            const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+            if (!dateRegex.test(startDate)) {
+                errors.push({ field: 'startDate', message: 'صيغة التاريخ غير صحيحة. يجب أن تكون YYYY-MM-DD.' });
+            }
+        }
+
+        const parsedMonthlyRent = monthlyRent !== undefined && monthlyRent !== '' && monthlyRent !== null ? parseFloat(monthlyRent) : undefined;
+        if (monthlyRent === undefined || monthlyRent === null || monthlyRent === '' || isNaN(parsedMonthlyRent)) {
+            errors.push({ field: 'monthlyRent', message: 'قيمة الإيجار الشهري مطلوبة.' });
+        } else if (parsedMonthlyRent <= 0 || parsedMonthlyRent > 999999999) {
+            errors.push({ field: 'monthlyRent', message: 'الإيجار الشهري يجب أن يكون أكبر من صفر وأقل من 999,999,999.' });
+        }
+
+        if (endDate && typeof endDate === 'string') {
+            const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+            if (!dateRegex.test(endDate)) {
+                errors.push({ field: 'endDate', message: 'صيغة تاريخ الانتهاء غير صحيحة.' });
+            } else if (startDate && endDate < startDate) {
+                errors.push({ field: 'endDate', message: 'تاريخ الانتهاء يجب أن يكون بعد تاريخ البداية.' });
+            }
+        }
+
+        if (errors.length > 0) {
+            return res.status(422).json({
+                success: false,
+                message: 'يرجى تصحيح الأخطاء التالية:',
+                errors,
+            });
+        }
+
+        const tenant = db.prepare(`
+            SELECT id, full_name, is_former FROM tenants WHERE id = ? AND user_id = ?
+        `).get(parsedTenantId, userId);
+
+        if (!tenant) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على المستأجر المحدد.',
+            });
+        }
+
+        if (tenant.is_former === 1) {
+            return res.status(400).json({
+                success: false,
+                message: 'لا يمكن إنشاء عقد لمستأجر سابق. يرجى إعادة تسجيل المستأجر أولاً.',
+            });
+        }
+
+        const unit = db.prepare(`
+            SELECT u.id, u.unit_number, u.status, u.monthly_rent, p.name AS property_name
+            FROM units u
+            JOIN properties p ON u.property_id = p.id
+            WHERE u.id = ? AND p.user_id = ?
+        `).get(parsedUnitId, userId);
+
+        if (!unit) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على الوحدة المحددة.',
+            });
+        }
+
+        if (unit.status !== 'Vacant') {
+            const statusMap = { Occupied: 'مؤجرة حالياً', UnderMaintenance: 'تحت الصيانة' };
+            return res.status(409).json({
+                success: false,
+                message: `الوحدة ${unit.unit_number} غير متاحة للتأجير. حالتها: ${statusMap[unit.status] || unit.status}.`,
+            });
+        }
+
+        const existingActive = db.prepare(`
+            SELECT c.id, u.unit_number FROM contracts c
+            JOIN units u ON c.unit_id = u.id
+            WHERE c.tenant_id = ? AND c.status = 'Active'
+            LIMIT 1
+        `).get(parsedTenantId);
+
+        if (existingActive) {
+            return res.status(409).json({
+                success: false,
+                message: `المستأجر لديه بالفعل عقد نشط على الوحدة ${existingActive.unit_number}. يرجى إنهاء العقد الحالي أولاً.`,
+            });
+        }
+
+        const dueDaySetting = db.prepare("SELECT value FROM settings WHERE user_id = ? AND key = 'dueDay'").get(userId);
+        const dueDay = dueDaySetting ? parseInt(dueDaySetting.value, 10) : 5;
+
+        const startDateObj = new Date(startDate + 'T00:00:00Z');
+        const billingMonth = startDateObj.getUTCMonth() + 1;
+        const billingYear = startDateObj.getUTCFullYear();
+
+        const daysInMonth = new Date(billingYear, billingMonth, 0).getDate();
+        const safeDueDay = Math.min(dueDay, daysInMonth);
+        const dueDateStr = `${billingYear}-${String(billingMonth).padStart(2, '0')}-${String(safeDueDay).padStart(2, '0')}`;
+
+        const seqResult = db.prepare(`
+            SELECT COALESCE(COUNT(*), 0) + 1 AS seq
+            FROM invoices WHERE billing_month = ? AND billing_year = ?
+        `).get(billingMonth, billingYear);
+
+        const seq = String(seqResult.seq).padStart(3, '0');
+        const invoiceNumber = `INV-${billingYear}-${String(billingMonth).padStart(2, '0')}-${seq}`;
+
+        const finalRent = parsedMonthlyRent;
+
+        const createContractTransaction = db.transaction(() => {
+
+            db.prepare(`
+                UPDATE units SET status = 'Occupied', monthly_rent = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE id = ?
+            `).run(finalRent, parsedUnitId);
+
+            const contractResult = db.prepare(`
+                INSERT INTO contracts (tenant_id, unit_id, start_date, end_date, monthly_rent, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'Active',
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            `).run(parsedTenantId, parsedUnitId, startDate, endDate || null, finalRent);
+
+            const contractId = contractResult.lastInsertRowid;
+
+            const invoiceResult = db.prepare(`
+                INSERT INTO invoices (contract_id, unit_id, tenant_id, invoice_number,
+                                      billing_month, billing_year, amount, due_date, status,
+                                      created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid',
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            `).run(contractId, parsedUnitId, parsedTenantId, invoiceNumber,
+                   billingMonth, billingYear, finalRent, dueDateStr);
+
+            const invoiceId = invoiceResult.lastInsertRowid;
+
+            return { contractId, invoiceId };
+        });
+
+        const { contractId, invoiceId } = createContractTransaction();
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, details, created_at)
+            VALUES (?, 'ADD_CONTRACT', ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, contractId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown',
+               JSON.stringify({ tenantId: parsedTenantId, unitId: parsedUnitId, monthlyRent: finalRent }));
+
+        return res.status(201).json({
+            success: true,
+            message: 'تم تفعيل عقد الإيجار بنجاح. تم إنشاء العقد وتوليد فاتورة الشهر الأول تلقائياً.',
+            data: {
+                contract: {
+                    id: contractId,
+                    tenantId: parsedTenantId,
+                    tenantName: tenant.full_name,
+                    unitId: parsedUnitId,
+                    unitNumber: unit.unit_number,
+                    propertyName: unit.property_name,
+                    startDate: startDate,
+                    endDate: endDate || null,
+                    monthlyRent: finalRent,
+                    status: 'Active',
+                },
+                invoice: {
+                    id: invoiceId,
+                    invoiceNumber: invoiceNumber,
+                    billingMonth: billingMonth,
+                    billingYear: billingYear,
+                    amount: finalRent,
+                    dueDate: dueDateStr,
+                    status: 'Unpaid',
+                },
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function listContracts(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const { status, tenantId, unitId } = req.query;
+
+        let query = `
+            SELECT
+                c.id,
+                c.tenant_id AS tenantId,
+                t.full_name AS tenantName,
+                t.phone AS tenantPhone,
+                c.unit_id AS unitId,
+                u.unit_number AS unitNumber,
+                p.name AS propertyName,
+                c.start_date AS startDate,
+                c.end_date AS endDate,
+                c.monthly_rent AS monthlyRent,
+                c.status,
+                c.created_at AS createdAt,
+                c.updated_at AS updatedAt
+            FROM contracts c
+            JOIN tenants t ON c.tenant_id = t.id
+            JOIN units u ON c.unit_id = u.id
+            JOIN properties p ON u.property_id = p.id
+            WHERE t.user_id = ?
+        `;
+
+        const params = [userId];
+
+        if (status) {
+            const validStatuses = ['Active', 'Expired', 'Terminated'];
+            if (validStatuses.includes(status)) {
+                query += ' AND c.status = ?';
+                params.push(status);
+            }
+        }
+
+        if (tenantId) {
+            const parsed = parseInt(tenantId, 10);
+            if (!isNaN(parsed)) {
+                query += ' AND c.tenant_id = ?';
+                params.push(parsed);
+            }
+        }
+
+        if (unitId) {
+            const parsed = parseInt(unitId, 10);
+            if (!isNaN(parsed)) {
+                query += ' AND c.unit_id = ?';
+                params.push(parsed);
+            }
+        }
+
+        query += ' ORDER BY c.created_at DESC';
+
+        const contracts = db.prepare(query).all(...params);
+
+        return res.status(200).json({
+            success: true,
+            data: contracts,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function getContract(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const contractId = parseInt(req.params.id, 10);
+
+        if (isNaN(contractId)) {
+            return res.status(400).json({ success: false, message: 'معرف العقد غير صالح.' });
+        }
+
+        const contract = db.prepare(`
+            SELECT
+                c.id,
+                c.tenant_id AS tenantId,
+                t.full_name AS tenantName,
+                t.phone AS tenantPhone,
+                c.unit_id AS unitId,
+                u.unit_number AS unitNumber,
+                p.name AS propertyName,
+                c.start_date AS startDate,
+                c.end_date AS endDate,
+                c.monthly_rent AS monthlyRent,
+                c.status,
+                c.created_at AS createdAt,
+                c.updated_at AS updatedAt
+            FROM contracts c
+            JOIN tenants t ON c.tenant_id = t.id
+            JOIN units u ON c.unit_id = u.id
+            JOIN properties p ON u.property_id = p.id
+            WHERE c.id = ? AND t.user_id = ?
+        `).get(contractId, userId);
+
+        if (!contract) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على العقد.',
+            });
+        }
+
+        const invoices = db.prepare(`
+            SELECT
+                i.id,
+                i.invoice_number AS invoiceNumber,
+                i.billing_month AS billingMonth,
+                i.billing_year AS billingYear,
+                i.amount,
+                i.due_date AS dueDate,
+                i.status,
+                i.notes,
+                COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.invoice_id = i.id), 0) AS paidAmount,
+                i.created_at AS createdAt
+            FROM invoices i
+            WHERE i.contract_id = ?
+            ORDER BY i.billing_year DESC, i.billing_month DESC
+        `).all(contractId);
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                ...contract,
+                invoices,
+            },
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+function terminateContract(req, res, next) {
+    try {
+        const db = getDatabase();
+        const userId = req.user.userId;
+        const contractId = parseInt(req.params.id, 10);
+
+        if (isNaN(contractId)) {
+            return res.status(400).json({ success: false, message: 'معرف العقد غير صالح.' });
+        }
+
+        const { terminationDate, reason } = req.body;
+
+        if (!terminationDate || typeof terminationDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(terminationDate)) {
+            return res.status(422).json({
+                success: false,
+                message: 'تاريخ إنهاء العقد مطلوب ويجب أن يكون بصيغة YYYY-MM-DD.',
+                errors: [{ field: 'terminationDate', message: 'صيغة التاريخ غير صحيحة.' }],
+            });
+        }
+
+        const contract = db.prepare(`
+            SELECT c.id, c.status, c.unit_id, c.tenant_id, c.start_date, t.full_name AS tenantName
+            FROM contracts c
+            JOIN tenants t ON c.tenant_id = t.id
+            WHERE c.id = ? AND t.user_id = ?
+        `).get(contractId, userId);
+
+        if (!contract) {
+            return res.status(404).json({
+                success: false,
+                message: 'عذراً، لم يتم العثور على العقد.',
+            });
+        }
+
+        if (contract.status !== 'Active') {
+            return res.status(400).json({
+                success: false,
+                message: 'العقد غير نشط أو منتهي بالفعل.',
+            });
+        }
+
+        if (terminationDate < contract.start_date) {
+            return res.status(422).json({
+                success: false,
+                message: 'تاريخ الإنتهاء يجب أن يكون بعد تاريخ بداية العقد.',
+            });
+        }
+
+        const unpaidInvoices = db.prepare(`
+            SELECT COUNT(*) AS count, COALESCE(SUM(i.amount - COALESCE((
+                SELECT SUM(p.amount) FROM payments p WHERE p.invoice_id = i.id
+            ), 0)), 0) AS totalDue
+            FROM invoices i
+            WHERE i.contract_id = ? AND i.status IN ('Unpaid', 'Overdue', 'Partial')
+        `).get(contractId);
+
+        let warningMessage = null;
+        if (unpaidInvoices.count > 0) {
+            warningMessage = `يوجد ${unpaidInvoices.count} فاتورة غير مدفوعة بقيمة ${unpaidInvoices.totalDue.toFixed(2)} ريال. سيتم إنهاء العقد مع بقاء الفواتير غير مدفوعة.`;
+        }
+
+        const terminateTransaction = db.transaction(() => {
+            db.prepare(`
+                UPDATE contracts SET status = 'Terminated', end_date = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE id = ?
+            `).run(terminationDate, contractId);
+
+            db.prepare(`
+                UPDATE units SET status = 'Vacant', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE id = ?
+            `).run(contract.unit_id);
+        });
+
+        terminateTransaction();
+
+        db.prepare(`
+            INSERT INTO audit_log (user_id, action, target_id, ip_address, user_agent, details, created_at)
+            VALUES (?, 'TERMINATE_CONTRACT', ?, ?, ?, ?,
+                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        `).run(userId, contractId, req.ipAddress || '0.0.0.0', req.userAgent || 'unknown',
+               JSON.stringify({ reason: reason || null, terminationDate }));
+
+        const responseData = {
+            contractId: contract.id,
+            status: 'Terminated',
+            endDate: terminationDate,
+            unitStatus: 'Vacant',
+        };
+
+        const responseMessage = 'تم إنهاء العقد وتحرير الوحدة بنجاح. الوحدة الآن شاغرة.';
+
+        if (warningMessage) {
+            return res.status(200).json({
+                success: true,
+                warning: warningMessage,
+                message: responseMessage,
+                data: responseData,
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: responseMessage,
+            data: responseData,
+        });
+
+    } catch (error) {
+        next(error);
+    }
+}
+
+module.exports = {
+    createContract,
+    listContracts,
+    getContract,
+    terminateContract,
+};
+
+--------------------------------------------------------------------------------
+FILE 8: routes/contractRoutes.js
+--------------------------------------------------------------------------------
+
+'use strict';
+
+const express = require('express');
+const router = express.Router();
+
+const { authenticate } = require('../middleware/authMiddleware');
+const {
+    createContract,
+    listContracts,
+    getContract,
+    terminateContract,
+} = require('../controllers/contractController');
+
+router.get('/', authenticate, listContracts);
+router.get('/:id', authenticate, getContract);
+router.post('/', authenticate, createContract);
+router.patch('/:id/terminate', authenticate, terminateContract);
+
+module.exports = router;
+
+--------------------------------------------------------------------------------
+FILE 9: seed.js (Testing Seed Data Script)
+--------------------------------------------------------------------------------
+
+#!/usr/bin/env node
+
+'use strict';
+
+const path = require('path');
+const bcrypt = require('bcrypt');
+const Database = require('better-sqlite3');
+
+const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'pms_database.db');
+
+const LANDLORD_EMAIL = 'ahmed@example.com';
+const LANDLORD_PASSWORD = 'secret123';
+const LANDLORD_NAME = 'أحمد محمد';
+const SALT_ROUNDS = 12;
+
+console.log('='.repeat(60));
+console.log('  Uqari (عقاري) – Database Seed Script');
+console.log('='.repeat(60));
+console.log(`  Database: ${DB_PATH}`);
+console.log('');
+
+const db = new Database(DB_PATH);
+
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+console.log('[1/5] تنظيف البيانات القديمة...');
+
+db.exec(`
+    DELETE FROM payments;
+    DELETE FROM invoices;
+    DELETE FROM maintenance_tickets;
+    DELETE FROM expenses;
+    DELETE FROM contracts;
+    DELETE FROM tenants;
+    DELETE FROM units;
+    DELETE FROM properties;
+    DELETE FROM settings;
+    DELETE FROM audit_log;
+    DELETE FROM cron_log;
+    DELETE FROM sync_log;
+    DELETE FROM users;
+`);
+
+console.log('      تم مسح جميع البيانات القديمة بنجاح.');
+
+console.log('[2/5] إنشاء حساب المالك...');
+
+const passwordHash = bcrypt.hashSync(LANDLORD_PASSWORD, SALT_ROUNDS);
+
+const userResult = db.prepare(`
+    INSERT INTO users (name, email, password_hash, role, is_active, created_at, updated_at)
+    VALUES (?, ?, ?, 'landlord', 1,
+            '2026-01-01T08:00:00Z',
+            '2026-06-01T10:00:00Z')
+`).run(LANDLORD_NAME, LANDLORD_EMAIL, passwordHash);
+
+const landlordId = userResult.lastInsertRowid;
+console.log(`      تم إنشاء حساب المالك: ${LANDLORD_EMAIL} / ${LANDLORD_PASSWORD}`);
+
+const insertSetting = db.prepare(`
+    INSERT INTO settings (user_id, key, value, created_at, updated_at)
+    VALUES (?, ?, ?,
+            '2026-01-01T08:00:00Z',
+            '2026-01-01T08:00:00Z')
+`);
+
+const defaultSettings = [
+    ['currency', 'SAR'],
+    ['billingDay', '1'],
+    ['dueDay', '5'],
+    ['fontSize', 'extraLarge'],
+    ['pinEnabled', 'false'],
+];
+
+for (const [key, value] of defaultSettings) {
+    insertSetting.run(landlordId, key, value);
+}
+
+console.log('      تم تعيين الإعدادات الافتراضية.');
+
+console.log('[3/5] إنشاء العقارات والوحدات...');
+
+const insertProperty = db.prepare(`
+    INSERT INTO properties (user_id, name, city, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?,
+            '2026-01-15T08:00:00Z',
+            '2026-01-15T08:00:00Z')
+`);
+
+const insertUnit = db.prepare(`
+    INSERT INTO units (property_id, unit_number, type, floor, monthly_rent, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?,
+            '2026-01-15T08:00:00Z',
+            '2026-01-15T08:00:00Z')
+`);
+
+const prop1Result = insertProperty.run(landlordId, 'عمارة الملك فهد', 'الرياض - حي النزهة', 'عمارة سكنية مكونة من 4 طوابق');
+const prop1Id = prop1Result.lastInsertRowid;
+
+insertUnit.run(prop1Id, '101', 'Apartment', 1, 2500, 'Occupied');
+insertUnit.run(prop1Id, '102', 'Apartment', 1, 2200, 'Occupied');
+insertUnit.run(prop1Id, '201', 'Apartment', 2, 3000, 'Occupied');
+insertUnit.run(prop1Id, '202', 'Apartment', 2, 2800, 'Occupied');
+insertUnit.run(prop1Id, '301', 'Apartment', 3, 3500, 'Vacant');
+insertUnit.run(prop1Id, '302', 'Apartment', 3, 3200, 'UnderMaintenance');
+
+const prop2Result = insertProperty.run(landlordId, 'مركز التسوق الحديث', 'جدة - حي الروضة', 'مركز تجاري صغير');
+const prop2Id = prop2Result.lastInsertRowid;
+
+insertUnit.run(prop2Id, 'محل 1', 'Shop', 1, 5000, 'Occupied');
+insertUnit.run(prop2Id, 'محل 2', 'Shop', 1, 4500, 'Occupied');
+insertUnit.run(prop2Id, 'محل 3', 'Shop', 2, 4000, 'Vacant');
+insertUnit.run(prop2Id, 'مكتب 1', 'Room', 2, 3000, 'Occupied');
+
+const prop3Result = insertProperty.run(landlordId, 'استراحة النخيل', 'الدمام - حي الشاطئ', 'فيلات للإيجار الموسمي');
+const prop3Id = prop3Result.lastInsertRowid;
+
+insertUnit.run(prop3Id, 'فيلا أ', 'Villa', 1, 8000, 'Occupied');
+insertUnit.run(prop3Id, 'فيلا ب', 'Villa', 1, 7500, 'Occupied');
+insertUnit.run(prop3Id, 'فيلا ج', 'Villa', 1, 7000, 'Vacant');
+insertUnit.run(prop3Id, 'استوديو 1', 'Studio', 1, 2000, 'Occupied');
+insertUnit.run(prop3Id, 'استوديو 2', 'Studio', 1, 1800, 'Vacant');
+
+console.log('      تم إنشاء 3 عقارات بـ 15 وحدة.');
+
+console.log('[4/5] إنشاء المستأجرين والعقود والفواتير...');
+
+const units = db.prepare('SELECT id, unit_number, monthly_rent, property_id FROM units ORDER BY id').all();
+const unitMap = {};
+for (const u of units) {
+    unitMap[u.unit_number] = u;
+}
+
+const insertTenant = db.prepare(`
+    INSERT INTO tenants (user_id, full_name, phone, secondary_phone, national_id, notes, is_former, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 0,
+            '2026-01-20T08:00:00Z',
+            '2026-01-20T08:00:00Z')
+`);
+
+const insertContract = db.prepare(`
+    INSERT INTO contracts (tenant_id, unit_id, start_date, end_date, monthly_rent, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?,
+            '2026-02-01T08:00:00Z',
+            '2026-02-01T08:00:00Z')
+`);
+
+const insertInvoice = db.prepare(`
+    INSERT INTO invoices (contract_id, unit_id, tenant_id, invoice_number,
+                          billing_month, billing_year, amount, due_date, status, notes,
+                          created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            '2026-02-01T08:00:00Z',
+            '2026-02-01T08:00:00Z')
+`);
+
+const insertPayment = db.prepare(`
+    INSERT INTO payments (invoice_id, amount, payment_date, payment_method, notes, created_at)
+    VALUES (?, ?, ?, ?, ?,
+            '2026-02-05T10:00:00Z')
+`);
+
+const seedData = [
+    {
+        tenant: { name: 'محمد عبدالله السالم', phone: '+966501234567', idNumber: '1012345678' },
+        unitNumber: '101', startDate: '2026-02-01', monthlyRent: 2500, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'خالد فهد العتيبي', phone: '+966555432109', idNumber: '1098765432' },
+        unitNumber: '102', startDate: '2026-03-01', monthlyRent: 2200, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'عبدالرحمن سعد القحطاني', phone: '+966508888777', idNumber: '1055555555' },
+        unitNumber: '201', startDate: '2026-01-01', monthlyRent: 3000, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'فيصل عمر الزهراني', phone: '+966500111222', idNumber: '1033334444' },
+        unitNumber: '202', startDate: '2026-04-01', monthlyRent: 2800, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'نواف إبراهيم الدوسري', phone: '+966550555666', idNumber: '1077778888' },
+        unitNumber: 'محل 1', startDate: '2026-01-01', monthlyRent: 5000, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'ماجد عبدالعزيز الحربي', phone: '+966545678901', idNumber: '1022223333' },
+        unitNumber: 'محل 2', startDate: '2026-02-01', monthlyRent: 4500, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'سلطان محمد المالكي', phone: '+966598765432', idNumber: '1066661111' },
+        unitNumber: 'مكتب 1', startDate: '2026-03-01', monthlyRent: 3000, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'هاني عبدالله الشمري', phone: '+966530001122', idNumber: '1044445555' },
+        unitNumber: 'فيلا أ', startDate: '2026-01-15', monthlyRent: 8000, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'بدر تركي المطيري', phone: '+966512345678', idNumber: '1088889999' },
+        unitNumber: 'فيلا ب', startDate: '2026-04-01', monthlyRent: 7500, contractStatus: 'Active'
+    },
+    {
+        tenant: { name: 'أيمن حسن الغامدي', phone: '+966577778888', idNumber: '1011112222' },
+        unitNumber: 'استوديو 1', startDate: '2026-05-01', monthlyRent: 2000, contractStatus: 'Active'
+    },
+];
+
+const formerTenantResult = insertTenant.run(
+    landlordId, 'سامي علي العنزي', '+966599990000', null, '1099990000',
+    'مستأجر سابق - غادر في مارس 2026', 1
+);
+const formerTenantId = formerTenantResult.lastInsertRowid;
+
+let invoiceSeq = 0;
+const currentMonth = new Date().getUTCMonth() + 1;
+const currentYear = new Date().getUTCFullYear();
+
+for (const item of seedData) {
+    const unit = unitMap[item.unitNumber];
+
+    const tResult = insertTenant.run(
+        landlordId,
+        item.tenant.name,
+        item.tenant.phone,
+        null,
+        item.tenant.idNumber,
+        null
+    );
+    const tenantId = tResult.lastInsertRowid;
+
+    const cResult = insertContract.run(
+        tenantId,
+        unit.id,
+        item.startDate,
+        null,
+        item.monthlyRent,
+        item.contractStatus
+    );
+    const contractId = cResult.lastInsertRowid;
+
+    const startParts = item.startDate.split('-').map(Number);
+    let sm = startParts[1];
+    let sy = startParts[0];
+
+    while (sy < currentYear || (sy === currentYear && sm <= currentMonth)) {
+        invoiceSeq++;
+        const invNum = `INV-${sy}-${String(sm).padStart(2, '0')}-${String(invoiceSeq).padStart(3, '0')}`;
+        const dueDate = `${sy}-${String(sm).padStart(2, '0')}-05`;
+
+        const now = new Date();
+        const invoiceDate = new Date(sy, sm - 1, 5);
+        let invStatus = 'Unpaid';
+        if (invoiceDate < new Date(now.getFullYear(), now.getMonth(), 1)) {
+            invStatus = 'Paid';
+        } else if (invoiceDate < now) {
+            if (now.getDate() > 5 && sm === now.getMonth() + 1 && sy === now.getFullYear()) {
+                invStatus = 'Overdue';
+            } else {
+                invStatus = 'Unpaid';
+            }
+        } else {
+            invStatus = 'Unpaid';
+        }
+
+        const iResult = insertInvoice.run(
+            contractId, unit.id, tenantId, invNum,
+            sm, sy, item.monthlyRent, dueDate, invStatus,
+            invStatus === 'Paid' ? 'تم الدفع' : null
+        );
+        const invoiceId = iResult.lastInsertRowid;
+
+        if (invStatus === 'Paid') {
+            insertPayment.run(invoiceId, item.monthlyRent, dueDate, 'BankTransfer', 'تحويل بنكي');
+        }
+
+        sm++;
+        if (sm > 12) {
+            sm = 1;
+            sy++;
+        }
+    }
+}
+
+console.log('      تم إنشاء 10 مستأجرين نشطين وعقودهم وفواتيرهم.');
+console.log('      تم إنشاء مستأجر سابق واحد (سامي العنزي).');
+
+console.log('[5/5] إنشاء نماذج للمصروفات وتذاكر الصيانة...');
+
+const insertExpense = db.prepare(`
+    INSERT INTO expenses (user_id, property_id, unit_id, type, amount, date, description, receipt_image_path, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+            '2026-03-15T08:00:00Z',
+            '2026-03-15T08:00:00Z')
+`);
+
+const insertTicket = db.prepare(`
+    INSERT INTO maintenance_tickets (user_id, unit_id, reported_by, description, urgency, status, issue_image_path, resolved_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+            '2026-04-10T08:00:00Z',
+            '2026-04-10T08:00:00Z')
+`);
+
+insertExpense.run(landlordId, prop1Id, unitMap['302'].id, 'Maintenance', 850, '2026-03-15', 'إصلاح تسريب مياه في الوحدة 302 - تغيير قطع السباكة', null);
+insertExpense.run(landlordId, prop1Id, null, 'Utilities', 1200, '2026-04-01', 'فاتورة كهرباء العمارة - شهر مارس', null);
+insertExpense.run(landlordId, prop1Id, null, 'Cleaning', 400, '2026-04-05', 'تنظيف المدخل والسلالم', null);
+insertExpense.run(landlordId, prop2Id, null, 'MunicipalityFees', 2500, '2026-04-10', 'رسوم بلدية المركز التجاري - الربع الأول', null);
+insertExpense.run(landlordId, prop3Id, unitMap['فيلا ج'].id, 'Repairs', 3200, '2026-05-20', 'دهان وتجديد فيلا ج - تحضير للمستأجر الجديد', null);
+insertExpense.run(landlordId, prop1Id, null, 'Insurance', 1800, '2026-01-10', 'تأمين الممتلكات السنوي', null);
+
+insertTicket.run(landlordId, unitMap['302'].id, 'المالك', 'تسريب مياه من السقف في الحمام الرئيسي. يحتاج سباك بشكل عاجل.', 'High', 'Resolved', null, '2026-03-18');
+insertTicket.run(landlordId, unitMap['201'].id, 'عبدالرحمن سعد القحطاني', 'مكيف الغرفة الرئيسية لا يعمل. التكييف قديم ويحتاج صيانة أو استبدال.', 'Medium', 'InProgress', null, null);
+insertTicket.run(landlordId, unitMap['محل 2'].id, 'ماجد عبدالعزيز الحربي', 'قفل باب المحل مكسور. لا يمكن إغلاق المحل بشكل آمن.', 'Emergency', 'Open', null, null);
+insertTicket.run(landlordId, unitMap['302'].id, 'المالك', 'تجديد الوحدة بالكامل قبل التأجير (دهان - سباكة - كهرباء)', 'Low', 'Open', null, null);
+
+console.log('      تم إنشاء 6 مصروفات و 4 تذاكر صيانة.');
+console.log('');
+console.log('='.repeat(60));
+console.log('  تم الانتهاء من تجهيز بيانات الاختبار بنجاح!');
+console.log('='.repeat(60));
+console.log('');
+console.log('  بيانات الدخول:');
+console.log(`    البريد: ${LANDLORD_EMAIL}`);
+console.log(`    كلمة المرور: ${LANDLORD_PASSWORD}`);
+console.log('');
+console.log('  ملخص البيانات:');
+console.log('    الملاك: 1');
+console.log('    العقارات: 3');
+console.log('    الوحدات: 15');
+console.log('    المستأجرون النشطون: 10');
+console.log('    المستأجرون السابقون: 1');
+console.log('    العقود النشطة: 10');
+console.log('    الفواتير: ~50');
+console.log('    المصروفات: 6');
+console.log('    تذاكر الصيانة: 4');
+console.log('');
+
+db.close();
+
+================================================================================
+END OF PHASE 4-B DELIVERABLE
+================================================================================

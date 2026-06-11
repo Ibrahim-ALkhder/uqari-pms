@@ -1,0 +1,163 @@
+// =============================================================================
+// authRoutes.js – Authentication Route Definitions
+// =============================================================================
+// Defines Express routes for authentication endpoints:
+//   POST /api/auth/register  - Create a new landlord account
+//   POST /api/auth/login     - Authenticate and receive JWT
+//   POST /api/auth/verify-pin - Verify 4-digit PIN (requires auth)
+//   POST /api/auth/change-pin - Change or disable PIN (requires auth)
+// All routes delegate to the corresponding controller functions.
+// =============================================================================
+
+'use strict';
+
+const express = require('express');
+const rateLimit = require('express-rate-limit');
+const router = express.Router();
+
+// ── Middleware ──────────────────────────────────────────────────────────────
+const { authenticate } = require('../middleware/authMiddleware');
+
+// ── Rate Limiters ──────────────────────────────────────────────────────────
+const authLimiter = process.env.NODE_ENV === 'test'
+    ? (req, res, next) => next()
+    : rateLimit({
+        windowMs: 15 * 60 * 1000,
+        max: 10,
+        message: { success: false, message: 'طلبات كثيرة جداً. يرجى المحاولة بعد 15 دقيقة.' },
+        standardHeaders: true,
+        legacyHeaders: false,
+    });
+
+const registerLimiter = process.env.NODE_ENV === 'test'
+    ? (req, res, next) => next()
+    : rateLimit({
+        windowMs: 60 * 60 * 1000,
+        max: 3,
+        message: { success: false, message: 'لقد تجاوزت الحد المسموح لمحاولات التسجيل. يرجى المحاولة بعد ساعة.' },
+        standardHeaders: true,
+        legacyHeaders: false,
+    });
+
+// ── Controller ─────────────────────────────────────────────────────────────
+const {
+    register,
+    login,
+    verifyPin,
+    changePin,
+} = require('../controllers/authController');
+
+// ── Routes ─────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/auth/register
+ * Creates a new landlord user account.
+ * Public – no authentication required.
+ *
+ * Request Body:
+ * {
+ *   "name": "أحمد محمد",
+ *   "email": "ahmed@example.com",
+ *   "password": "secret123"
+ * }
+ *
+ * Success (201):
+ * {
+ *   "success": true,
+ *   "message": "✓ تم إنشاء الحساب بنجاح. مرحباً بك في نظام إدارة العقارات.",
+ *   "data": {
+ *     "token": "eyJhbGciOiJIUzI1NiIs...",
+ *     "user": { "id": 1, "name": "أحمد محمد", "email": "ahmed@example.com", "role": "landlord", "hasPin": false }
+ *   }
+ * }
+ *
+ * Error (409): Duplicate email
+ * Error (422): Validation failure
+ */
+router.post('/register', registerLimiter, register);
+
+/**
+ * POST /api/auth/login
+ * Authenticates a user by email and password.
+ * Public – no authentication required.
+ *
+ * Request Body:
+ * {
+ *   "email": "ahmed@example.com",
+ *   "password": "secret123"
+ * }
+ *
+ * Success (200):
+ * {
+ *   "success": true,
+ *   "message": "✓ تم تسجيل الدخول بنجاح.",
+ *   "data": {
+ *     "token": "eyJhbGciOiJIUzI1NiIs...",
+ *     "user": { "id": 1, "name": "أحمد محمد", "email": "ahmed@example.com", "role": "landlord", "hasPin": false }
+ *   }
+ * }
+ *
+ * Error (401): Invalid credentials (generic Arabic message)
+ * Error (422): Validation failure
+ * Error (403): Account disabled
+ */
+router.post('/login', authLimiter, login);
+
+/**
+ * POST /api/auth/verify-pin
+ * Verifies the landlord's 4-digit PIN after login.
+ * Requires authentication (JWT token from login).
+ *
+ * Headers: Authorization: Bearer <token>
+ *
+ * Request Body:
+ * {
+ *   "pin": "1234"
+ * }
+ *
+ * Success (200):
+ * {
+ *   "success": true,
+ *   "message": "✓ تم التحقق من الرقم السري بنجاح.",
+ *   "data": { "verified": true }
+ * }
+ *
+ * Error (401): Wrong PIN
+ * Error (422): Invalid PIN format
+ * Error (429): Account locked (3 failed attempts in 5 minutes)
+ */
+router.post('/verify-pin', authenticate, verifyPin);
+
+/**
+ * POST /api/auth/change-pin
+ * Changes or disables the 4-digit PIN.
+ * Requires authentication (JWT token from login).
+ *
+ * Headers: Authorization: Bearer <token>
+ *
+ * Request Body (change PIN):
+ * {
+ *   "currentPin": "1234",
+ *   "newPin": "5678",
+ *   "confirmPin": "5678"
+ * }
+ *
+ * Request Body (disable PIN):
+ * {
+ *   "currentPin": "1234",
+ *   "newPin": null,
+ *   "confirmPin": null
+ * }
+ *
+ * Success (200):
+ * {
+ *   "success": true,
+ *   "message": "✓ تم تحديث الرقم السري بنجاح."
+ * }
+ *
+ * Error (401): Wrong current PIN
+ * Error (422): PIN format invalid or mismatch
+ */
+router.post('/change-pin', authenticate, changePin);
+
+module.exports = router;
