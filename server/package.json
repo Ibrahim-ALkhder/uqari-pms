@@ -5,7 +5,7 @@
   "description": "Uqari (عقاري) – PMS Backend API Server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node seed.js && node server.js",
     "dev": "node server.js",
     "seed": "node seed.js",
     "test": "vitest run"
