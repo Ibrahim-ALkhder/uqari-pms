@@ -1,0 +1,13 @@
+services:
+  - type: static
+    name: uqari-pms-client
+    rootDir: client
+    buildCommand: npm run build
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://uqari-pms-api.onrender.com/api
