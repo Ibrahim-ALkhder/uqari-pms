@@ -27,8 +27,9 @@ process.on('unhandledRejection', (reason) => console.error('[FATAL]', reason));
 
 // ── Background Initialization ──────────────────────────────────────────
 setTimeout(() => {
-    const { initializeDatabase } = require('./database');
-    try { initializeDatabase(); } catch (err) { console.error('[SERVER] DB init skipped:', err.message); }
+    let dbModule;
+    try { dbModule = require('./database'); } catch (err) { console.error('[SERVER] DB module load failed:', err.message); }
+    if (dbModule) { try { dbModule.initializeDatabase(); } catch (err) { console.error('[SERVER] DB init failed:', err.message); } }
 
     let authRoutes, propertyRoutes, unitRoutes, tenantRoutes, contractRoutes;
     let invoiceRoutes, paymentRoutes, expenseRoutes, maintenanceRoutes;
