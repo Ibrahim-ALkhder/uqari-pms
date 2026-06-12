@@ -10,6 +10,9 @@
     "seed": "node seed.js",
     "test": "vitest run"
   },
+  "engines": {
+    "node": "18.x"
+  },
   "keywords": [
     "pms",
     "property-management",
