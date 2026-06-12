@@ -1,6 +1,7 @@
 services:
-  - type: static
+  - type: web
     name: uqari-pms-client
+    runtime: static
     rootDir: client
     buildCommand: npm run build
     staticPublishPath: ./dist
