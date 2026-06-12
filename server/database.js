@@ -7,6 +7,7 @@
 // =============================================================================
 
 const path = require('path');
+const fs = require('fs');
 const Database = require('better-sqlite3');
 
 const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'pms_database.db');
@@ -20,6 +21,12 @@ let db = null;
 function initializeDatabase() {
     if (db) {
         return db;
+    }
+
+    // Ensure the directory exists (Render's fresh clone won't have it)
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
     }
 
     // Open the database file (creates it if missing)
