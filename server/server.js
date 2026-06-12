@@ -215,6 +215,18 @@ if (process.env.NODE_ENV !== 'test') {
         console.log(`  CORS Origins: ${allowedOrigins.join(', ')}`);
         console.log('='.repeat(60));
 
+        // ── Seed Database (non-blocking, in child process) ──────────────────
+        setTimeout(() => {
+            const cp = require('child_process');
+            const child = cp.fork('./seed.js', [], { silent: true });
+            child.stdout.on('data', (d) => process.stdout.write(`[SEED] ${d}`));
+            child.stderr.on('data', (d) => process.stderr.write(`[SEED] ${d}`));
+            child.on('exit', (code) => {
+                if (code === 0) console.log('[SERVER] Database seeded successfully.');
+                else console.error(`[SERVER] Seed process exited with code ${code}`);
+            });
+        }, 2000);
+
         // ── Start Financial Cron Engine ────────────────────────────────────
         startFinancialCron();
     });

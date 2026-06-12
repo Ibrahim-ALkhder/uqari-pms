@@ -13,7 +13,7 @@
 'use strict';
 
 const path = require('path');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 
 // ── Initialize database schema ────────────────────────────────────────────
 const { initializeDatabase, getDatabase } = require('./database');
